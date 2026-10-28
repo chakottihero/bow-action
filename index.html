@@ -111,10 +111,10 @@
     }
     #crosshair::before { left: -9px; top: -1px; width: 18px; height: 2px; } /* 横棒 */
     #crosshair::after  { left: -1px; top: -9px; width: 2px; height: 18px; } /* 縦棒 */
-    /* 照準が的に重なっているときは赤くする */
+    /* 照準が風船に重なっているときは赤くする */
     #crosshair.on-target { --crosshair-color: #ff3030; }
 
-    /* ===== 1本の矢で抜いた的の数（「×3 HIT!」）を画面中央に表示 ===== */
+    /* ===== 1本の矢で割った風船の数（「×3 HIT!」）を画面中央に表示 ===== */
     #hit-popup {
       position: fixed;
       left: 50%;
@@ -186,9 +186,9 @@
 </head>
 <body>
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.9</div>
+  <div id="version">v0.10</div>
   <div id="sound">🔊</div>
-  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F ・ 鏡で矢を反射させて的をまとめて射抜こう</div>
+  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F ・ 鏡で矢を反射させて風船をまとめて割ろう</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
   <div id="shoot">SHOOT</div>
@@ -216,27 +216,59 @@
     const JUMP_BUFFER = 0.12;       // 着地直前のジャンプ入力を受け付ける猶予 [秒]
     const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
 
-    // ---- 鏡と的の配置 ----
+    // ---- 鏡と風船（的）の配置 ----
     // 鏡：x, z は鏡の中心、y は下端の高さ、yaw は鏡の面が向いている方向 [度]
     //   （0 で +Z 向き、90 で +X 向き。鏡は両面とも反射する）
     const MIRROR_WIDTH = 2.0;       // 鏡の幅 [m]
     const MIRROR_HEIGHT = 2.0;      // 鏡の高さ [m]
     const MIRROR_THICKNESS = 0.1;   // 鏡の厚さ [m]
+    const MIRROR_FRAME_WIDTH = 0.1; // 鏡の木の枠の太さ [m]（枠に当たった矢は反射せずに消える）
     const MIRRORS = [
       { x: 10, y: 0, z: 0, yaw: -45 },   // 鏡A：+X 方向へ飛んできた矢を +Z 方向へ曲げる
       { x: 10, y: 0, z: 11, yaw: -135 }, // 鏡B：鏡Aから来た矢を -X 方向へ曲げる
       { x: -12, y: 0, z: 0, yaw: 45 },   // 鏡C：-X 方向へ飛んできた矢を +Z 方向へ曲げる
     ];
-    // 的：x, z は中心、y は底面の高さ。中心が胸の高さ（ARROW_HEIGHT）に来るよう宙に浮かせている
+    // 風船：x, z は中心。高さはすべて胸の高さ（ARROW_HEIGHT）にそろえて浮かせている
     //   スタート地点から +X へ撃つ → 鏡A → 鏡B と反射させると最大6個、
-    //   -X へ撃つ → 鏡C で反射させると最大4個まとめて抜ける配置
-    const TARGET_SPOTS = [
-      [4, 0.8, 0], [7, 0.8, 0],     // スタート → 鏡A の間
-      [10, 0.8, 4], [10, 0.8, 7],   // 鏡A → 鏡B の間
-      [7, 0.8, 11], [4, 0.8, 11],   // 鏡B の先
-      [-6, 0.8, 0],                 // スタート → 鏡C の間
-      [-12, 0.8, 4], [-12, 0.8, 8], [-12, 0.8, 12], // 鏡C の先
+    //   -X へ撃つ → 鏡C で反射させると最大4個まとめて割れる配置
+    const BALLOON_SPOTS = [
+      [4, 0], [7, 0],       // スタート → 鏡A の間
+      [10, 4], [10, 7],     // 鏡A → 鏡B の間
+      [7, 11], [4, 11],     // 鏡B の先
+      [-6, 0],              // スタート → 鏡C の間
+      [-12, 4], [-12, 8], [-12, 12], // 鏡C の先
     ];
+
+    // ---- 見た目：風船 ----
+    const BALLOON_RADIUS = 0.45;    // 風船の半径 [m]（当たり判定も同じ大きさ）
+    const BALLOON_STRETCH = 1.2;    // 風船の縦長さ（縦の半径 = BALLOON_RADIUS × この値）
+    const BALLOON_COLORS = [        // 風船の色。BALLOON_SPOTS の順に、この並びをくり返して割り当てる
+      0xe8322f, // 赤
+      0xf5c518, // 黄
+      0x2a8cf0, // 青
+      0x3cb24a, // 緑
+      0xff7eb6, // ピンク
+    ];
+    const BALLOON_BOB_AMPLITUDE = 0.05; // ふわふわ揺れる幅（片側）[m]。上下合わせて 10cm
+    const BALLOON_BOB_PERIOD = 2.4;     // ふわふわ1往復にかかる時間 [秒]
+    const BALLOON_RESPAWN_DELAY = 3.0;  // 風船が全部割れてから復活するまでの時間 [秒]
+    const BALLOON_POP_PIECES = 14;      // 割れたときに散る破片の数
+
+    // ---- 見た目：夜の縁日の射的場 ----
+    const SKY_COLOR = 0x0b1233;     // 夜空（暗い紺色）。霧の色にも使う
+    const FLOOR_COLOR = 0x9a6a3c;   // 床（木の板）
+    const WALL_COLOR = 0x4a2e1c;    // 周りの壁
+    const WALL_HEIGHT = 4.0;        // 周りの壁の高さ [m]
+    const CRATE_COLOR = 0xb07a42;   // 段差の木箱
+    const MIRROR_FRAME_COLOR = 0x7a4a24; // 鏡の木の枠
+    const CURTAIN_RED = 0xd8202a;   // 紅白幕の赤
+    const CURTAIN_WHITE = 0xf4f0ea; // 紅白幕の白
+    const CURTAIN_STRIPE_WIDTH = 0.6; // 紅白幕のしま1本の幅 [m]
+    const LANTERN_COLOR = 0xff3a1e; // 提灯の色（自分で光る）
+    const LANTERNS_PER_WALL = 12;   // 壁1面あたりの提灯の数（4面に並べる）
+    const LANTERN_LIGHT_COUNT = 4;  // 実際に周りを照らすライトの数（スマホの負荷を抑えるため少なめ）
+    const LANTERN_LIGHT_INTENSITY = 25; // 提灯のライトの明るさ
+
     const CAMERA_DISTANCE = 7.5;    // カメラと注視点（主人公の胸あたり）の距離
     const CAMERA_PITCH_INIT = 0.3;  // カメラの上下角度の初期値 [ラジアン]（0で水平、大きいほど見下ろす）
     const CAMERA_PITCH_MIN = -0.25; // 上下角度の下限（マイナスでカメラが下がり、少し見上げられる。地面より下へは CAMERA_MIN_Y で止まる）
@@ -261,17 +293,11 @@
     const ARROW_HEIGHT = 1.3;       // 矢を撃ち出す高さ（足元基準。胸の高さ）
     const CROSSHAIR_RAISE = 0.15;   // 照準を画面中央からどれだけ上に置くか（画面の高さに対する割合）
     const AIM_FAR_DISTANCE = 100;   // 照準の先に何もないとき（空など）に狙う地点までの距離 [m]
-    const AIM_ASSIST_ANGLE = 10;    // エイムアシストが効く、照準からの角度 [度]（0でアシストなし）
     const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
-    const TARGET_HP = 1;            // 的のHP（1なら矢が1回当たれば消える）
-    const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
-    const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]
-    const TARGET_RESPAWN_DELAY = 3.0; // 的が全部消えてから復活するまでの時間 [秒]
     const SE_MASTER_VOLUME = 0.7;   // 効果音全体の音量（0〜1）
     const SE_VOLUMES = {            // 効果音ごとの音量（0〜1、全体音量に掛け合わされる）
       shoot: 0.5,   // 矢を撃つ「ヒュッ」
-      hit: 0.8,     // 的に当たる「トッ」
-      destroy: 0.6, // 的を倒す「ポンッ」
+      pop: 0.7,     // 風船が割れる「パンッ」
       jump: 0.35,   // ジャンプ「ピョン」
       land: 0.6,    // 着地「トン」
       reflect: 0.5, // 矢が鏡で反射「キンッ」
@@ -382,42 +408,24 @@
         src.stop(t + 0.17);
         return [src];
       },
-      // トッ：低めの三角波を一瞬で下げる＋ごく短いノイズのアタック
-      hit(ctx, t, out) {
-        const osc = sweepOsc(ctx, 'triangle', t, 320, 110, 0.07);
-        const env = envelope(ctx, t, 1.4, 0.002, 0.09);
-        osc.connect(env).connect(out);
-        osc.start(t);
-        osc.stop(t + 0.1);
-
-        const click = noiseSource(ctx);
-        const hp = ctx.createBiquadFilter();
-        hp.type = 'highpass';
-        hp.frequency.value = 1500;
-        const clickEnv = envelope(ctx, t, 0.5, 0.001, 0.025);
-        click.connect(hp).connect(clickEnv).connect(out);
-        click.start(t);
-        click.stop(t + 0.03);
-        return [osc, click];
-      },
-      // ポンッ：高めのサイン波を下げつつ、短いノイズの破裂感を重ねる
-      destroy(ctx, t, out) {
-        const osc = sweepOsc(ctx, 'sine', t, 1100, 380, 0.14);
-        const env = envelope(ctx, t, 1.4, 0.003, 0.18);
-        osc.connect(env).connect(out);
-        osc.start(t);
-        osc.stop(t + 0.19);
-
+      // パンッ：広い帯域のノイズをごく短く鳴らして破裂させ、低い「ボッ」で空気が抜ける重みを足す
+      pop(ctx, t, out) {
         const burst = noiseSource(ctx);
         const bp = ctx.createBiquadFilter();
         bp.type = 'bandpass';
-        bp.frequency.value = 2500;
-        bp.Q.value = 0.8;
-        const burstEnv = envelope(ctx, t, 0.6, 0.001, 0.06);
+        bp.frequency.value = 1800;
+        bp.Q.value = 0.6;
+        const burstEnv = envelope(ctx, t, 2.2, 0.001, 0.09);
         burst.connect(bp).connect(burstEnv).connect(out);
         burst.start(t);
-        burst.stop(t + 0.07);
-        return [osc, burst];
+        burst.stop(t + 0.1);
+
+        const osc = sweepOsc(ctx, 'sine', t, 260, 70, 0.06);
+        const env = envelope(ctx, t, 1.2, 0.001, 0.08);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.09);
+        return [burst, osc];
       },
       // ピョン：矩形波のピッチを低→高へ持ち上げる（ローパスで角を丸めて軽い音に）
       jump(ctx, t, out) {
@@ -507,22 +515,39 @@
     document.body.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x87a9c9);
-    scene.fog = new THREE.Fog(0x87a9c9, 30, 80);
+    scene.background = new THREE.Color(SKY_COLOR);
+    scene.fog = new THREE.Fog(SKY_COLOR, 40, 110);
 
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
 
-    // ライト：全体を照らす半球光 ＋ 影を落とす平行光
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 0.8));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-    sun.position.set(10, 20, 8);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.left = -30;
-    sun.shadow.camera.right = 30;
-    sun.shadow.camera.top = 30;
-    sun.shadow.camera.bottom = -30;
-    scene.add(sun);
+    // ライト：夜なので全体はほんのり暗く。青白い月明かり（影あり）＋ 提灯の暖かい光（少数のライト）
+    scene.add(new THREE.HemisphereLight(0x5566aa, 0x2a1a10, 0.7));
+    const moon = new THREE.DirectionalLight(0xaabbff, 0.7);
+    moon.position.set(10, 20, 8);
+    moon.castShadow = true;
+    moon.shadow.mapSize.set(1024, 1024);
+    moon.shadow.camera.left = -30;
+    moon.shadow.camera.right = 30;
+    moon.shadow.camera.top = 30;
+    moon.shadow.camera.bottom = -30;
+    scene.add(moon);
+
+    // 画像ファイルを使わず、canvas に描いた絵をテクスチャにする
+    function makeCanvasTexture(width, height, draw) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      draw(canvas.getContext('2d'), width, height);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      return texture;
+    }
+    // 基準の色を少し明るく/暗くした CSS の色文字列を返す（木目のムラなどに使う）
+    function shade(hex, lightness) {
+      return new THREE.Color(hex).offsetHSL(0, 0, lightness).getStyle();
+    }
 
     // =========================================================
     // ステージ（地面と段差の箱）
@@ -531,11 +556,11 @@
     const colliders = []; // { min: Vector3, max: Vector3 } の配列
 
     // 箱を作ってシーンと当たり判定リストの両方に登録する関数
-    // x, z は箱の中心、y は箱の底面の高さ
-    function addBox(x, y, z, w, h, d, color) {
+    // x, z は箱の中心、y は箱の底面の高さ。material には色（数値）かマテリアルを渡す
+    function addBox(x, y, z, w, h, d, material) {
       const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(w, h, d),
-        new THREE.MeshStandardMaterial({ color })
+        typeof material === 'number' ? new THREE.MeshStandardMaterial({ color: material }) : material
       );
       mesh.position.set(x, y + h / 2, z);
       mesh.castShadow = true;
@@ -548,16 +573,138 @@
       return mesh;
     }
 
-    // 地面：灰色の大きな板（上面が y=0 になるよう、厚みぶん下にずらす）
-    addBox(0, -1, 0, STAGE_HALF * 2, 1, STAGE_HALF * 2, 0x888888);
+    // ---- 床：木の板（上面が y=0 になるよう、厚みぶん下にずらす） ----
+    // 1枚の絵に板を8枚描き、それを床全体にくり返し貼る（1枚の絵 = 4m 四方）
+    const PLANK_SHADES = [0.02, -0.03, 0.05, -0.01, 0.03, -0.05, 0.0, -0.02]; // 板ごとの明るさのムラ（固定）
+    const floorTexture = makeCanvasTexture(256, 256, (g, w, h) => {
+      const rowH = h / PLANK_SHADES.length;
+      PLANK_SHADES.forEach((lightness, row) => {
+        g.fillStyle = shade(FLOOR_COLOR, lightness);
+        g.fillRect(0, row * rowH, w, rowH);
+        // 板の継ぎ目（段ごとに位置をずらす）
+        g.fillStyle = shade(FLOOR_COLOR, -0.18);
+        g.fillRect(((row * 97) % w), row * rowH, 2, rowH);
+        // 板と板のすき間
+        g.fillRect(0, row * rowH, w, 2);
+      });
+    });
+    floorTexture.repeat.set(STAGE_HALF * 2 / 4, STAGE_HALF * 2 / 4);
+    addBox(0, -1, 0, STAGE_HALF * 2, 1, STAGE_HALF * 2, new THREE.MeshStandardMaterial({ map: floorTexture, roughness: 0.85 }));
 
-    // 段差になる箱を3つ（低い→中くらい→高いの順で階段状に登れる配置）
-    addBox(-4, 0, 6, 4, 0.3, 4, 0xb0b0b0);  // 低い段差：歩くだけで乗れる
-    addBox(0, 0, 10, 4, 1.2, 4, 0xa0a0a0);  // 中くらい：ジャンプで乗る
-    addBox(4, 0, 14, 4, 2.4, 4, 0x909090);  // 高い：中くらいの箱からジャンプで乗る
+    // ---- 段差になる木箱を3つ（低い→中くらい→高いの順で階段状に登れる配置） ----
+    const crateTexture = makeCanvasTexture(128, 128, (g, w, h) => {
+      g.fillStyle = shade(CRATE_COLOR, 0);
+      g.fillRect(0, 0, w, h);
+      // 横板の継ぎ目
+      g.fillStyle = shade(CRATE_COLOR, -0.12);
+      for (let i = 1; i < 4; i++) g.fillRect(0, (h / 4) * i - 1, w, 2);
+      // 外枠
+      g.strokeStyle = shade(CRATE_COLOR, -0.2);
+      g.lineWidth = 12;
+      g.strokeRect(6, 6, w - 12, h - 12);
+    });
+    const crateMaterial = new THREE.MeshStandardMaterial({ map: crateTexture, roughness: 0.8 });
+    addBox(-4, 0, 6, 4, 0.3, 4, crateMaterial);  // 低い段差：歩くだけで乗れる
+    addBox(0, 0, 10, 4, 1.2, 4, crateMaterial);  // 中くらい：ジャンプで乗る
+    addBox(4, 0, 14, 4, 2.4, 4, crateMaterial);  // 高い：中くらいの箱からジャンプで乗る
+
+    // ---- 周りの壁（高さ WALL_HEIGHT）。当たり判定あり、当たった矢は消える ----
+    const WALL_THICKNESS = 0.5;
+    const WALL_INNER = STAGE_HALF - WALL_THICKNESS;  // 壁の内側の面の位置
+    const WALL_LENGTH = WALL_INNER * 2;              // 壁の内側の長さ
+    const wallMaterial = new THREE.MeshStandardMaterial({ color: WALL_COLOR, roughness: 0.9 });
+    const wallCenter = STAGE_HALF - WALL_THICKNESS / 2;
+    addBox(0, 0, wallCenter, STAGE_HALF * 2, WALL_HEIGHT, WALL_THICKNESS, wallMaterial);  // 奥（+Z）
+    addBox(0, 0, -wallCenter, STAGE_HALF * 2, WALL_HEIGHT, WALL_THICKNESS, wallMaterial); // 手前（-Z）
+    addBox(wallCenter, 0, 0, WALL_THICKNESS, WALL_HEIGHT, WALL_LENGTH, wallMaterial);     // 右（+X）
+    addBox(-wallCenter, 0, 0, WALL_THICKNESS, WALL_HEIGHT, WALL_LENGTH, wallMaterial);    // 左（-X）
+
+    // 壁の4面それぞれの「内側の面の中心」と「内側を向く方向」（幕・提灯・ライトの配置に使う）
+    const WALL_SIDES = [
+      { center: new THREE.Vector3(0, 0, WALL_INNER), inward: new THREE.Vector3(0, 0, -1) },
+      { center: new THREE.Vector3(WALL_INNER, 0, 0), inward: new THREE.Vector3(-1, 0, 0) },
+      { center: new THREE.Vector3(0, 0, -WALL_INNER), inward: new THREE.Vector3(0, 0, 1) },
+      { center: new THREE.Vector3(-WALL_INNER, 0, 0), inward: new THREE.Vector3(1, 0, 0) },
+    ];
+    // 壁に沿った横方向（内側を向いたときの右手方向）
+    const alongWall = (side) => new THREE.Vector3(-side.inward.z, 0, side.inward.x);
+
+    // ---- 紅白幕（赤と白の縦じま） ----
+    const CURTAIN_BOTTOM = 0.3, CURTAIN_TOP = 2.9;
+    const curtainTexture = makeCanvasTexture(64, 4, (g, w, h) => {
+      g.fillStyle = new THREE.Color(CURTAIN_RED).getStyle();
+      g.fillRect(0, 0, w / 2, h);
+      g.fillStyle = new THREE.Color(CURTAIN_WHITE).getStyle();
+      g.fillRect(w / 2, 0, w / 2, h);
+    });
+    curtainTexture.repeat.set(WALL_LENGTH / (CURTAIN_STRIPE_WIDTH * 2), 1);
+    const curtainMaterial = new THREE.MeshStandardMaterial({ map: curtainTexture, roughness: 0.95 });
+    const curtainGeometry = new THREE.PlaneGeometry(WALL_LENGTH, CURTAIN_TOP - CURTAIN_BOTTOM);
+    for (const side of WALL_SIDES) {
+      const curtain = new THREE.Mesh(curtainGeometry, curtainMaterial);
+      curtain.position.copy(side.center).addScaledVector(side.inward, 0.02); // 壁から少しだけ浮かせる
+      curtain.position.y = (CURTAIN_BOTTOM + CURTAIN_TOP) / 2;
+      curtain.rotation.y = Math.atan2(side.inward.x, side.inward.z); // 板の表（+Z）を内側へ向ける
+      curtain.receiveShadow = true;
+      scene.add(curtain);
+    }
+
+    // ---- 提灯（赤い光る球）。数が多いので InstancedMesh でまとめて描き、光は自己発光の素材で表現 ----
+    const LANTERN_Y = WALL_HEIGHT - 0.6;  // 提灯の中心の高さ
+    const LANTERN_INSET = 0.35;           // 壁の内側の面からの距離
+    const lanternBodies = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.22, 16, 12),
+      new THREE.MeshStandardMaterial({ color: LANTERN_COLOR, emissive: LANTERN_COLOR, emissiveIntensity: 1.3 }),
+      WALL_SIDES.length * LANTERNS_PER_WALL
+    );
+    const lanternCaps = new THREE.InstancedMesh( // 提灯の上下の黒い輪
+      new THREE.CylinderGeometry(0.13, 0.13, 0.06, 12),
+      new THREE.MeshStandardMaterial({ color: 0x1a1210 }),
+      WALL_SIDES.length * LANTERNS_PER_WALL * 2
+    );
+    const cordMaterial = new THREE.LineBasicMaterial({ color: 0x1a1210 });
+    const lanternMatrix = new THREE.Matrix4();
+    const lanternBodyScale = new THREE.Vector3(1, 1.35, 1); // 少し縦長
+    const noRotation = new THREE.Quaternion();
+    let lanternIndex = 0;
+    for (const side of WALL_SIDES) {
+      const along = alongWall(side);
+      const base = side.center.clone().addScaledVector(side.inward, LANTERN_INSET);
+      for (let i = 0; i < LANTERNS_PER_WALL; i++) {
+        const offset = -WALL_LENGTH / 2 + (i + 0.5) * (WALL_LENGTH / LANTERNS_PER_WALL); // 等間隔
+        const pos = base.clone().addScaledVector(along, offset);
+        pos.y = LANTERN_Y;
+        lanternBodies.setMatrixAt(lanternIndex, lanternMatrix.compose(pos, noRotation, lanternBodyScale));
+        lanternCaps.setMatrixAt(lanternIndex * 2, lanternMatrix.makeTranslation(pos.x, pos.y + 0.3, pos.z));
+        lanternCaps.setMatrixAt(lanternIndex * 2 + 1, lanternMatrix.makeTranslation(pos.x, pos.y - 0.3, pos.z));
+        lanternIndex++;
+      }
+      // 提灯を吊るすひも（壁沿いに1本）
+      const cordY = LANTERN_Y + 0.33;
+      const cord = new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+        base.clone().addScaledVector(along, -WALL_LENGTH / 2).setY(cordY),
+        base.clone().addScaledVector(along, WALL_LENGTH / 2).setY(cordY),
+      ]), cordMaterial);
+      scene.add(cord);
+    }
+    scene.add(lanternBodies, lanternCaps);
+
+    // 実際のライトは少しだけ。壁の周りに等間隔に置いて、提灯の暖かい光が届いているように見せる
+    for (let i = 0; i < LANTERN_LIGHT_COUNT; i++) {
+      // 壁4面を1周 = 4 として、その上の等間隔の位置に置く
+      const around = (i + 0.5) * WALL_SIDES.length / LANTERN_LIGHT_COUNT;
+      const side = WALL_SIDES[Math.floor(around)];
+      const pos = side.center.clone()
+        .addScaledVector(alongWall(side), (around % 1 - 0.5) * WALL_LENGTH)
+        .addScaledVector(side.inward, 6); // 壁に近すぎると幕が白飛びするので少し内側に置く
+      pos.y = LANTERN_Y;
+      const light = new THREE.PointLight(0xff7a40, LANTERN_LIGHT_INTENSITY, 45, 1.4);
+      light.position.copy(pos);
+      scene.add(light);
+    }
 
     // =========================================================
-    // 鏡（水色の薄い板）
+    // 鏡（水色の薄い板＋木の枠）
     // 鏡は斜めに置けるので、軸に平行な箱（AABB）の colliders には入れず、
     // 「鏡の中心・面の向き（normal）・横方向（right）」を持つ回転した箱として別に扱う。
     // 当たり判定は鏡のローカル座標（right, 上, normal）に変換して行う。
@@ -570,14 +717,29 @@
       metalness: 0.3,
       roughness: 0.2,
     });
-    const mirrorGeometry = new THREE.BoxGeometry(MIRROR_WIDTH, MIRROR_HEIGHT, MIRROR_THICKNESS);
+    const F = MIRROR_FRAME_WIDTH;
+    // 鏡の面（枠の内側）。当たり判定の箱より少し薄くして、枠の中に収まって見えるようにする
+    const mirrorGlassGeometry = new THREE.BoxGeometry(MIRROR_WIDTH - F * 2, MIRROR_HEIGHT - F * 2, MIRROR_THICKNESS * 0.5);
+    const mirrorFrameMaterial = new THREE.MeshStandardMaterial({ color: MIRROR_FRAME_COLOR, roughness: 0.8 });
+    // 木の枠：上下の横木と左右の縦木 [幅, 高さ, x, y]
+    const MIRROR_FRAME_PARTS = [
+      [MIRROR_WIDTH, F, 0, MIRROR_HEIGHT / 2 - F / 2],
+      [MIRROR_WIDTH, F, 0, -MIRROR_HEIGHT / 2 + F / 2],
+      [F, MIRROR_HEIGHT - F * 2, MIRROR_WIDTH / 2 - F / 2, 0],
+      [F, MIRROR_HEIGHT - F * 2, -MIRROR_WIDTH / 2 + F / 2, 0],
+    ];
     const mirrors = MIRRORS.map(({ x, y, z, yaw }) => {
       const rad = THREE.MathUtils.degToRad(yaw);
-      const mesh = new THREE.Mesh(mirrorGeometry, mirrorMaterial);
+      const mesh = new THREE.Group();
+      mesh.add(new THREE.Mesh(mirrorGlassGeometry, mirrorMaterial));
+      for (const [w, h, px, py] of MIRROR_FRAME_PARTS) {
+        const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, MIRROR_THICKNESS), mirrorFrameMaterial);
+        part.position.set(px, py, 0);
+        mesh.add(part);
+      }
+      mesh.traverse((o) => { o.castShadow = true; o.receiveShadow = true; });
       mesh.position.set(x, y + MIRROR_HEIGHT / 2, z);
       mesh.rotation.y = rad;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
       scene.add(mesh);
       return {
         center: mesh.position.clone(),
@@ -586,6 +748,13 @@
         localBox: { min: MIRROR_HALF.clone().negate(), max: MIRROR_HALF.clone() },
       };
     });
+
+    // 鏡のローカル座標の点が「反射する面」の上か（表か裏の面で、木の枠より内側）
+    function isMirrorFace(local) {
+      return Math.abs(Math.abs(local.z) - MIRROR_HALF.z) < 1e-4 &&
+             Math.abs(local.x) <= MIRROR_HALF.x - MIRROR_FRAME_WIDTH &&
+             Math.abs(local.y) <= MIRROR_HALF.y - MIRROR_FRAME_WIDTH;
+    }
 
     // ワールド座標の点・方向を、鏡のローカル座標（x: 横, y: 上, z: 面の向き）に変換する
     function toMirrorLocal(mirror, v, out, isDirection = false) {
@@ -600,87 +769,160 @@
     }
 
     // =========================================================
-    // 的（赤い1m四方の箱）。矢は的を貫通する
-    // 生きている間は当たり判定リスト colliders にも登録し、プレイヤーが乗ったりぶつかったりできる。
-    // collider.target に的自身を入れておき、矢が当たったときに「的か壁か」を見分ける。
+    // 風船（的）。矢は風船を貫通し、当たった風船は一瞬で割れる
+    // 当たり判定は見た目と同じ「縦長の球（楕円体）」。上下にふわふわ揺れるので、
+    // 判定にも揺れたあとの中心（balloon.center）を使う。プレイヤーは風船をすり抜けられる。
     // =========================================================
-    const TARGET_SIZE = 1.0;
-    // 的の配置はファイル上部の TARGET_SPOTS で決める
-    const targetGeometry = new THREE.BoxGeometry(TARGET_SIZE, TARGET_SIZE, TARGET_SIZE);
-    const targets = TARGET_SPOTS.map(([x, y, z]) => {
-      // 被弾時に個別に光らせるため、マテリアルは的ごとに作る
-      const mesh = new THREE.Mesh(targetGeometry, new THREE.MeshStandardMaterial({ color: 0xd83030 }));
-      mesh.position.set(x, y + TARGET_SIZE / 2, z);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      scene.add(mesh);
-      const h = TARGET_SIZE / 2;
-      const target = {
-        mesh,
-        hp: TARGET_HP,
-        state: 'alive',   // 'alive'（生存）→ 'dying'（縮んでいる途中）→ 'dead'（消えた）
-        flashTimer: 0,    // 白く光っている残り時間
-        shrinkTimer: 0,   // 縮み終わるまでの残り時間
-        collider: {
-          min: new THREE.Vector3(x - h, y, z - h),
-          max: new THREE.Vector3(x + h, y + TARGET_SIZE, z + h),
-        },
-      };
-      target.collider.target = target;
-      colliders.push(target.collider);
-      return target;
-    });
-    let targetRespawnTimer = 0; // 全滅後、復活までの残り時間（0なら待機していない）
+    const BALLOON_HALF_HEIGHT = BALLOON_RADIUS * BALLOON_STRETCH;
+    const balloonGeometry = new THREE.SphereGeometry(BALLOON_RADIUS, 24, 16);
+    const balloonKnotGeometry = new THREE.ConeGeometry(0.05, 0.08, 8);
+    const BALLOON_STRING_LENGTH = 0.35;
+    const balloonStringGeometry = new THREE.CylinderGeometry(0.006, 0.006, BALLOON_STRING_LENGTH, 4);
+    const balloonStringMaterial = new THREE.MeshBasicMaterial({ color: 0xdddddd });
 
-    // 矢が的に当たったときの処理
-    function damageTarget(target) {
-      target.hp -= 1;
-      target.flashTimer = TARGET_FLASH_TIME;
-      // 倒したときは「ポンッ」、まだ残っているときは「トッ」
-      playSound(target.hp <= 0 ? 'destroy' : 'hit');
-      if (target.hp <= 0) {
-        target.state = 'dying';
-        target.shrinkTimer = TARGET_SHRINK_TIME;
-        // 縮み始めた時点で当たり判定から外す（もう矢もプレイヤーも当たらない）
-        colliders.splice(colliders.indexOf(target.collider), 1);
+    const balloons = BALLOON_SPOTS.map(([x, z], index) => {
+      const color = BALLOON_COLORS[index % BALLOON_COLORS.length]; // 色は並び順で固定
+      const material = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.3,
+        emissive: color,
+        emissiveIntensity: 0.15, // 夜でも色が分かるよう、ほんのり光らせる
+      });
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(balloonGeometry, material);
+      body.scale.y = BALLOON_STRETCH; // 少し縦長に
+      body.castShadow = true;
+      group.add(body);
+      // 下の小さな結び目（先端を上に向けた円錐）
+      const knot = new THREE.Mesh(balloonKnotGeometry, material);
+      knot.position.y = -BALLOON_HALF_HEIGHT - 0.02;
+      group.add(knot);
+      // 短い糸
+      const string = new THREE.Mesh(balloonStringGeometry, balloonStringMaterial);
+      string.position.y = -BALLOON_HALF_HEIGHT - 0.06 - BALLOON_STRING_LENGTH / 2;
+      group.add(string);
+      scene.add(group);
+
+      const base = new THREE.Vector3(x, ARROW_HEIGHT, z);
+      group.position.copy(base);
+      return {
+        group,
+        color,
+        base,                    // 揺れの中心
+        center: base.clone(),    // 今の中心（揺れたあと）
+        phase: index * 1.3,      // 揺れのタイミングを風船ごとに少しずらす（毎回同じ値）
+        state: 'alive',          // 'alive'（浮いている）/ 'popped'（割れた）
+      };
+    });
+    let balloonRespawnTimer = 0; // 全部割れたあと、復活までの残り時間（0なら待機していない）
+    let gameTime = 0;            // 揺れの計算に使う経過時間
+
+    // 点が風船（縦長の球）の中に入っているか
+    function pointInBalloon(p, balloon) {
+      const dx = (p.x - balloon.center.x) / BALLOON_RADIUS;
+      const dy = (p.y - balloon.center.y) / BALLOON_HALF_HEIGHT;
+      const dz = (p.z - balloon.center.z) / BALLOON_RADIUS;
+      return dx * dx + dy * dy + dz * dz <= 1;
+    }
+
+    // レイと風船（縦長の球）の交差判定。縦方向を縮めて普通の球にしてから解く
+    // tMin〜tMax の範囲で当たれば、その距離を返す。当たらなければ null
+    function rayBalloon(origin, dir, balloon, tMin, tMax) {
+      const ox = origin.x - balloon.center.x;
+      const oy = (origin.y - balloon.center.y) / BALLOON_STRETCH;
+      const oz = origin.z - balloon.center.z;
+      const dy = dir.y / BALLOON_STRETCH;
+      const a = dir.x * dir.x + dy * dy + dir.z * dir.z;
+      const b = 2 * (ox * dir.x + oy * dy + oz * dir.z);
+      const c = ox * ox + oy * oy + oz * oz - BALLOON_RADIUS * BALLOON_RADIUS;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+      const sq = Math.sqrt(disc);
+      const t1 = (-b - sq) / (2 * a);
+      const t2 = (-b + sq) / (2 * a);
+      if (t2 < tMin || t1 > tMax) return null;
+      return Math.max(t1, tMin);
+    }
+
+    // 風船を割る：一瞬で消して、同じ色の小さな破片を散らす
+    function popBalloon(balloon) {
+      balloon.state = 'popped';
+      balloon.group.visible = false;
+      playSound('pop');
+      spawnPopPieces(balloon.center, balloon.color);
+    }
+
+    // ---- 割れたときの破片 ----
+    const POP_PIECE_LIFE = 0.6; // 破片が消えるまでの時間 [秒]
+    const popPieceGeometry = new THREE.PlaneGeometry(0.12, 0.09);
+    const popBursts = []; // { material, pieces: [{ mesh, velocity, spin }], time }
+
+    function spawnPopPieces(center, color) {
+      // 1回の破裂でマテリアルを1つ作り、まとめて薄くしていく
+      const material = new THREE.MeshBasicMaterial({ color, transparent: true, side: THREE.DoubleSide });
+      const pieces = [];
+      for (let i = 0; i < BALLOON_POP_PIECES; i++) {
+        const mesh = new THREE.Mesh(popPieceGeometry, material);
+        // 風船の表面あたりから、外向きのばらばらな方向へ飛ばす
+        const dir = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
+        mesh.position.copy(center).addScaledVector(dir, BALLOON_RADIUS * 0.8);
+        mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+        scene.add(mesh);
+        pieces.push({
+          mesh,
+          velocity: dir.multiplyScalar(2.5 + Math.random() * 2).add(new THREE.Vector3(0, 1, 0)),
+          spin: new THREE.Vector3(Math.random() * 10, Math.random() * 10, Math.random() * 10),
+        });
+      }
+      popBursts.push({ material, pieces, time: POP_PIECE_LIFE });
+    }
+
+    function updatePopPieces(dt) {
+      for (let i = popBursts.length - 1; i >= 0; i--) {
+        const burst = popBursts[i];
+        burst.time -= dt;
+        const t = Math.max(0, burst.time / POP_PIECE_LIFE); // 1 → 0
+        burst.material.opacity = t;
+        for (const piece of burst.pieces) {
+          piece.velocity.y -= 9.8 * dt; // 少し落ちながら散る
+          piece.mesh.position.addScaledVector(piece.velocity, dt);
+          piece.mesh.rotation.x += piece.spin.x * dt;
+          piece.mesh.rotation.y += piece.spin.y * dt;
+          piece.mesh.rotation.z += piece.spin.z * dt;
+          piece.mesh.scale.setScalar(0.4 + 0.6 * t);
+        }
+        if (burst.time > 0) continue;
+        for (const piece of burst.pieces) scene.remove(piece.mesh);
+        burst.material.dispose();
+        popBursts.splice(i, 1);
       }
     }
 
-    // 的を初期状態に戻す
-    function resetTarget(target) {
-      target.hp = TARGET_HP;
-      target.state = 'alive';
-      target.flashTimer = 0;
-      target.mesh.scale.setScalar(1);
-      target.mesh.visible = true;
-      colliders.push(target.collider);
-    }
+    // 風船の揺れ・全部割れたときの復活・破片を更新する
+    function updateBalloons(dt) {
+      gameTime += dt;
+      for (const balloon of balloons) {
+        // その場でゆっくり上下にふわふわ（時間だけで決まるので毎回同じ動き）
+        const bob = Math.sin((gameTime / BALLOON_BOB_PERIOD) * Math.PI * 2 + balloon.phase);
+        balloon.center.copy(balloon.base);
+        balloon.center.y += bob * BALLOON_BOB_AMPLITUDE;
+        balloon.group.position.copy(balloon.center);
+      }
 
-    // 的の演出（光る・縮む）と、全滅時の復活を更新する
-    function updateTargets(dt) {
-      for (const t of targets) {
-        // 被弾直後は自己発光を白にして光らせる
-        t.flashTimer = Math.max(0, t.flashTimer - dt);
-        t.mesh.material.emissive.setHex(t.flashTimer > 0 ? 0xffffff : 0x000000);
-
-        if (t.state === 'dying') {
-          t.shrinkTimer -= dt;
-          if (t.shrinkTimer <= 0) {
-            t.state = 'dead';
-            t.mesh.visible = false;
-          } else {
-            t.mesh.scale.setScalar(t.shrinkTimer / TARGET_SHRINK_TIME);
+      // 全部割れたら一定時間後にまとめて復活させる
+      if (balloonRespawnTimer > 0) {
+        balloonRespawnTimer -= dt;
+        if (balloonRespawnTimer <= 0) {
+          for (const balloon of balloons) {
+            balloon.state = 'alive';
+            balloon.group.visible = true;
           }
         }
+      } else if (balloons.every((b) => b.state === 'popped')) {
+        balloonRespawnTimer = BALLOON_RESPAWN_DELAY;
       }
 
-      // 全部消えたら一定時間後にまとめて復活させる
-      if (targetRespawnTimer > 0) {
-        targetRespawnTimer -= dt;
-        if (targetRespawnTimer <= 0) targets.forEach(resetTarget);
-      } else if (targets.every((t) => t.state === 'dead')) {
-        targetRespawnTimer = TARGET_RESPAWN_DELAY;
-      }
+      updatePopPieces(dt);
     }
 
     // =========================================================
@@ -817,11 +1059,11 @@
     // 今撃ったら矢がどう飛び出すかを計算する（予測線と実際の射撃で共通）
     // 戻り値：{ aim: 照準の情報, dir: 飛ぶ向き, position: 矢の中心の初期位置, tip: 矢の先端の初期位置 }
     function computeShot() {
-      // 胸の高さから、照準の先（またはエイムアシストで選んだ的）へ向けて撃つ
+      // 胸の高さから、照準の先に見えている地点へ向けて撃つ（自動の狙い補正はしない）
       const aim = computeAim();
       const origin = player.position.clone();
       origin.y += ARROW_HEIGHT;
-      const dir = (aim.target ? aim.target.mesh.position : aim.point).clone().sub(origin);
+      const dir = aim.point.clone().sub(origin);
       // 狙う地点が近すぎる（足元などを狙った）ときは、向きが不安定になるのでカメラの視線方向へ撃つ
       if (dir.length() < 1.5) dir.copy(aim.rayDir);
       dir.normalize();
@@ -852,7 +1094,7 @@
         dir,
         life: ARROW_LIFETIME,
         reflections: 0,        // 鏡で反射した回数
-        hitTargets: new Set(), // この矢がすでに抜いた的（同じ的に2回当たらないように）
+        hitTargets: new Set(), // この矢がすでに割った風船（同じ風船に2回当たらないように）
         trail: createTrail(tip), // 光の尾
         sinceCorner: 0,        // 発射・最後の反射から進んだ距離（尾の描き方に使う）
       });
@@ -860,14 +1102,13 @@
     const ARROW_FORWARD = new THREE.Vector3(0, 0, 1); // 矢のモデルの先端方向
 
     // =========================================================
-    // 照準とエイムアシスト
+    // 照準
     // =========================================================
     const crosshairEl = document.getElementById('crosshair');
     crosshairEl.style.top = `${(0.5 - CROSSHAIR_RAISE) * 100}%`;
     // 照準の位置をカメラの画面座標（-1〜1、上が+）で表したもの
     const CROSSHAIR_NDC = new THREE.Vector2(0, CROSSHAIR_RAISE * 2);
     const aimRaycaster = new THREE.Raycaster();
-    const AIM_ASSIST_COS = Math.cos(THREE.MathUtils.degToRad(AIM_ASSIST_ANGLE));
 
     // レイ（origin から dir 方向）と箱の交差判定（スラブ法）。
     // tMin〜tMax の範囲で当たれば、その距離を返す。当たらなければ null
@@ -898,12 +1139,11 @@
       return rayBox(localOrigin, localDir, mirror.localBox, tMin, tMax);
     }
 
-    // レイが最初に当たる物（地形・的・鏡）を探す。鏡に当たったときは mirror が入る
-    // skipTargets を true にすると的を無視する（矢は的を貫通するので、軌道の計算ではこちらを使う）
-    function raycastColliders(origin, dir, tMin, tMax, ignore = null, skipTargets = false) {
+    // レイが最初に当たる物（地形・鏡）を探す。鏡に当たったときは mirror が入る
+    // （風船は矢が貫通するので、ここでは調べない）
+    function raycastColliders(origin, dir, tMin, tMax) {
       let best = null;
       for (const box of colliders) {
-        if (box === ignore || (skipTargets && box.target)) continue;
         const t = rayBox(origin, dir, box, tMin, best ? best.t : tMax);
         if (t !== null) best = { box, t };
       }
@@ -915,7 +1155,7 @@
     }
 
     // 今の照準で「どこを狙っているか」を計算する
-    // 戻り値：{ point: 照準の先の地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている的, target: アシストで狙う的 }
+    // 戻り値：{ point: 照準の先に見えている地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている風船 }
     function computeAim() {
       camera.updateMatrixWorld(); // 描画前でも最新のカメラ位置・向きで計算する
       aimRaycaster.setFromCamera(CROSSHAIR_NDC, camera);
@@ -929,34 +1169,16 @@
       const tStart = Math.max(0, chest.sub(camPos).dot(rayDir));
 
       const hit = raycastColliders(camPos, rayDir, tStart, AIM_FAR_DISTANCE);
-      const point = camPos.clone().addScaledVector(rayDir, hit ? hit.t : AIM_FAR_DISTANCE);
-      const onTarget = hit && hit.box && hit.box.target ? hit.box.target : null;
-
-      // エイムアシスト：照準に重なっている的があればそれを優先。
-      // なければ、照準から AIM_ASSIST_ANGLE 度以内で一番近い角度の的を選ぶ
-      let target = onTarget;
-      if (!target && AIM_ASSIST_ANGLE > 0) {
-        let bestCos = AIM_ASSIST_COS;
-        const toTarget = new THREE.Vector3();
-        const origin = player.position.clone();
-        origin.y += ARROW_HEIGHT;
-        for (const t of targets) {
-          if (t.state !== 'alive') continue;
-          toTarget.copy(t.mesh.position).sub(camPos);
-          const along = toTarget.dot(rayDir);
-          if (along <= tStart) continue; // プレイヤーより手前（カメラ側）の的は対象外
-          const cos = along / toTarget.length();
-          if (cos < bestCos) continue;
-          // 遮蔽物チェック：矢の発射位置から的の中心まで、他の箱や鏡に遮られていないか
-          const path = t.mesh.position.clone().sub(origin);
-          const dist = path.length();
-          path.divideScalar(dist);
-          if (raycastColliders(origin, path, 0, dist, t.collider)) continue;
-          bestCos = cos;
-          target = t;
-        }
+      let hitT = hit ? hit.t : AIM_FAR_DISTANCE;
+      // 地形や鏡より手前に風船が見えていれば、照準はその風船に重なっている
+      let onTarget = null;
+      for (const balloon of balloons) {
+        if (balloon.state !== 'alive') continue;
+        const t = rayBalloon(camPos, rayDir, balloon, tStart, hitT);
+        if (t !== null) { hitT = t; onTarget = balloon; }
       }
-      return { point, rayDir: rayDir.clone(), onTarget, target };
+      const point = camPos.clone().addScaledVector(rayDir, hitT);
+      return { point, rayDir: rayDir.clone(), onTarget };
     }
 
     // 点が箱の中に入っているか
@@ -982,16 +1204,16 @@
       for (const mirror of mirrors) {
         const t = rayMirror(prevTip, segmentDir, mirror, 0, best ? best.t : length);
         if (t === null) continue;
-        // 当たった点が鏡の「面」（表か裏）なら反射、「縁」（側面・上下）なら壁と同じ扱い
+        // 当たった点が鏡の「面」なら反射、「木の枠」なら壁と同じ扱い
         const point = prevTip.clone().addScaledVector(segmentDir, t);
         toMirrorLocal(mirror, point, hitLocal);
-        const onFace = Math.abs(Math.abs(hitLocal.z) - MIRROR_HALF.z) < 1e-4;
+        const onFace = isMirrorFace(hitLocal);
         best = { mirror, t, point, onFace, remaining: length - t };
       }
       return best;
     }
 
-    // 矢を消す。1つ以上の的を抜いていたら「×N HIT!」を表示する。光の尾は薄くしながら消していく
+    // 矢を消す。1つ以上の風船を割っていたら「×N HIT!」を表示する。光の尾は薄くしながら消していく
     function removeArrow(index) {
       const a = arrows[index];
       scene.remove(a.mesh);
@@ -1083,7 +1305,7 @@
         // ---- 鏡 ----
         const mirrorHit = findMirrorHit(prevTip, arrowTip);
         if (mirrorHit) {
-          // 鏡の縁に当たった、または反射回数の上限を超えたら消える
+          // 鏡の木の枠に当たった、または反射回数の上限を超えたら消える
           if (!mirrorHit.onFace || a.reflections >= ARROW_MAX_REFLECTIONS) {
             removeArrow(i);
             continue;
@@ -1107,21 +1329,16 @@
         trailHead.copy(arrowTip).addScaledVector(a.dir, -Math.min(a.sinceCorner, ARROW_TIP_OFFSET + ARROW_LENGTH / 2));
         setTrailHead(a.trail, trailHead);
 
-        // ---- 的・地形 ----
+        // ---- 風船・地形 ----
         // 先端の位置で当たり判定（細かい時間刻みで更新しているので、すり抜けにくい）
-        let hitWall = false;
-        const newHits = [];
-        for (const box of colliders) {
-          if (!pointInBox(arrowTip, box)) continue;
-          if (!box.target) { hitWall = true; continue; } // 地面・段差・壁
-          // 的は貫通する：まだ当たっていない的ならダメージを与え、矢はそのまま進む
-          if (!a.hitTargets.has(box.target)) newHits.push(box.target);
+        // 風船は貫通する：まだ当たっていない風船なら割り、矢はそのまま進む
+        for (const balloon of balloons) {
+          if (balloon.state !== 'alive' || a.hitTargets.has(balloon)) continue;
+          if (!pointInBalloon(arrowTip, balloon)) continue;
+          a.hitTargets.add(balloon);
+          popBalloon(balloon);
         }
-        // ダメージで的が消えると colliders から外れるので、ループを抜けてから与える
-        for (const target of newHits) {
-          a.hitTargets.add(target);
-          damageTarget(target);
-        }
+        const hitWall = colliders.some((box) => pointInBox(arrowTip, box)); // 床・木箱・周りの壁
 
         // 鏡以外に当たった、寿命が尽きた、またはマップの外へ出たら消す
         if (hitWall || a.life <= 0 || isOutsideStage(arrowTip)) removeArrow(i);
@@ -1132,7 +1349,7 @@
     // 撃つ前の予測線
     // 照準の方向へ撃ったときの軌道を、GUIDE_REFLECTIONS 回目の反射までと、
     // その反射直後の短い線（GUIDE_AFTER_LENGTH）だけ薄く表示する。
-    // 的は貫通するので無視し、地面・段差・鏡の縁・マップの外で線を止める。
+    // 風船は貫通するので無視し、床・木箱・壁・鏡の木の枠・マップの外で線を止める。
     // =========================================================
     const GUIDE_MAX_POINTS = GUIDE_REFLECTIONS + 2;
     const guidePositions = new Float32Array(GUIDE_MAX_POINTS * 3);
@@ -1174,15 +1391,15 @@
 
       for (let reflections = 0; ; reflections++) {
         const maxDist = distanceToStageExit(pos, dir);
-        const hit = raycastColliders(pos, dir, 1e-4, maxDist, null, true);
+        const hit = raycastColliders(pos, dir, 1e-4, maxDist);
         if (!hit) { push(pos.addScaledVector(dir, maxDist)); break; } // マップの外まで何もない
         pos.addScaledVector(dir, hit.t);
         push(pos);
-        if (!hit.mirror) break; // 地面・段差に当たったらそこで終わり
+        if (!hit.mirror) break; // 床・木箱・壁に当たったらそこで終わり
 
-        // 鏡の縁なら矢はそこで消えるので、線もそこで終わり
+        // 鏡の木の枠なら矢はそこで消えるので、線もそこで終わり
         toMirrorLocal(hit.mirror, pos, guideHitLocal);
-        if (Math.abs(Math.abs(guideHitLocal.z) - MIRROR_HALF.z) > 1e-4) break;
+        if (!isMirrorFace(guideHitLocal)) break;
         if (reflections >= GUIDE_REFLECTIONS) break; // 見せる反射回数を使い切ったら終わり
 
         // 反射させる
@@ -1190,7 +1407,7 @@
         dir.addScaledVector(n, -2 * dir.dot(n)).normalize();
         if (reflections + 1 >= GUIDE_REFLECTIONS) {
           // 最後に見せる反射：その直後の短い線だけ描く（途中で何かに当たればそこまで）
-          const end = raycastColliders(pos, dir, 1e-4, GUIDE_AFTER_LENGTH, null, true);
+          const end = raycastColliders(pos, dir, 1e-4, GUIDE_AFTER_LENGTH);
           push(pos.clone().addScaledVector(dir, end ? end.t : GUIDE_AFTER_LENGTH));
           break;
         }
@@ -1559,7 +1776,7 @@
         update(dt / steps);
         updateArrows(dt / steps);
       }
-      updateTargets(dt);
+      updateBalloons(dt);
       shootEl.classList.toggle('cooling', shootCooldown > 0);
 
       // 見た目を物理状態に合わせる
@@ -1567,7 +1784,7 @@
       playerMesh.rotation.y = player.facing;
 
       updateCamera(dt);
-      // 照準が的に重なっていれば照準を赤くし、予測線を更新する
+      // 照準が風船に重なっていれば照準を赤くし、予測線を更新する
       const shot = computeShot();
       crosshairEl.classList.toggle('on-target', !!shot.aim.onTarget);
       updateGuide(shot);
