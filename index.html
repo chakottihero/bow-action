@@ -66,6 +66,29 @@
     }
     #jump.pressed { background: rgba(255, 255, 255, 0.55); }
 
+    /* ===== 射撃ボタン（JUMPボタンの左上） ===== */
+    #shoot {
+      position: fixed;
+      right: calc(132px + env(safe-area-inset-right));
+      bottom: calc(116px + env(safe-area-inset-bottom));
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: rgba(255, 120, 90, 0.3);
+      border: 2px solid rgba(255, 255, 255, 0.6);
+      color: #fff;
+      font-size: 15px;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: none;
+      transition: opacity 0.1s;
+    }
+    #shoot.pressed { background: rgba(255, 120, 90, 0.6); }
+    /* クールダウン中は薄く表示して、まだ撃てないことを伝える */
+    #shoot.cooling { opacity: 0.45; }
+
     /* 操作説明（左上） */
     #help {
       position: fixed;
@@ -79,9 +102,10 @@
   </style>
 </head>
 <body>
-  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ</div>
+  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
+  <div id="shoot">SHOOT</div>
 
   <!-- Three.js を CDN から ES Module として読み込む -->
   <script type="importmap">
@@ -113,6 +137,14 @@
     const CAMERA_PITCH_SENSITIVITY = 0.004; // 縦ドラッグ1pxあたりの上下回転量 [ラジアン]
     const CAMERA_INVERT_Y = false;  // true にすると縦ドラッグの上下を反転
     const MANUAL_CAMERA_HOLD = 2.0; // 手動で回したあと、自動回り込みを止めておく時間 [秒]
+    const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
+    const ARROW_LIFETIME = 2.0;     // 矢が何にも当たらなかったときに消えるまでの時間 [秒]
+    const ARROW_HEIGHT = 0.9;       // 矢を撃ち出す高さ（足元基準。地面に置いた1mの的に当たるよう胸よりやや低め）
+    const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
+    const TARGET_HP = 3;            // 的のHP
+    const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
+    const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]
+    const TARGET_RESPAWN_DELAY = 3.0; // 的が全部消えてから復活するまでの時間 [秒]
     const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
 
     // =========================================================
@@ -174,6 +206,95 @@
     addBox(-4, 0, 6, 4, 0.3, 4, 0xb0b0b0);  // 低い段差：歩くだけで乗れる
     addBox(0, 0, 10, 4, 1.2, 4, 0xa0a0a0);  // 中くらい：ジャンプで乗る
     addBox(4, 0, 14, 4, 2.4, 4, 0x909090);  // 高い：中くらいの箱からジャンプで乗る
+
+    // =========================================================
+    // 的（赤い1m四方の箱）
+    // 生きている間は当たり判定リスト colliders にも登録し、プレイヤーが乗ったりぶつかったりできる。
+    // collider.target に的自身を入れておき、矢が当たったときに「的か壁か」を見分ける。
+    // =========================================================
+    const TARGET_SIZE = 1.0;
+    // 的の配置（x, z は中心、y は底面の高さ＝置く面の高さ）
+    const TARGET_SPOTS = [
+      [3, 0, 4],      // 地面
+      [-6, 0, 10],    // 地面
+      [-4, 0.3, 6.5], // 低い段差の上
+      [1, 1.2, 10.5], // 中くらいの箱の上
+      [4, 2.4, 14.5], // 高い箱の上
+    ];
+    const targetGeometry = new THREE.BoxGeometry(TARGET_SIZE, TARGET_SIZE, TARGET_SIZE);
+    const targets = TARGET_SPOTS.map(([x, y, z]) => {
+      // 被弾時に個別に光らせるため、マテリアルは的ごとに作る
+      const mesh = new THREE.Mesh(targetGeometry, new THREE.MeshStandardMaterial({ color: 0xd83030 }));
+      mesh.position.set(x, y + TARGET_SIZE / 2, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      const h = TARGET_SIZE / 2;
+      const target = {
+        mesh,
+        hp: TARGET_HP,
+        state: 'alive',   // 'alive'（生存）→ 'dying'（縮んでいる途中）→ 'dead'（消えた）
+        flashTimer: 0,    // 白く光っている残り時間
+        shrinkTimer: 0,   // 縮み終わるまでの残り時間
+        collider: {
+          min: new THREE.Vector3(x - h, y, z - h),
+          max: new THREE.Vector3(x + h, y + TARGET_SIZE, z + h),
+        },
+      };
+      target.collider.target = target;
+      colliders.push(target.collider);
+      return target;
+    });
+    let targetRespawnTimer = 0; // 全滅後、復活までの残り時間（0なら待機していない）
+
+    // 矢が的に当たったときの処理
+    function damageTarget(target) {
+      target.hp -= 1;
+      target.flashTimer = TARGET_FLASH_TIME;
+      if (target.hp <= 0) {
+        target.state = 'dying';
+        target.shrinkTimer = TARGET_SHRINK_TIME;
+        // 縮み始めた時点で当たり判定から外す（もう矢もプレイヤーも当たらない）
+        colliders.splice(colliders.indexOf(target.collider), 1);
+      }
+    }
+
+    // 的を初期状態に戻す
+    function resetTarget(target) {
+      target.hp = TARGET_HP;
+      target.state = 'alive';
+      target.flashTimer = 0;
+      target.mesh.scale.setScalar(1);
+      target.mesh.visible = true;
+      colliders.push(target.collider);
+    }
+
+    // 的の演出（光る・縮む）と、全滅時の復活を更新する
+    function updateTargets(dt) {
+      for (const t of targets) {
+        // 被弾直後は自己発光を白にして光らせる
+        t.flashTimer = Math.max(0, t.flashTimer - dt);
+        t.mesh.material.emissive.setHex(t.flashTimer > 0 ? 0xffffff : 0x000000);
+
+        if (t.state === 'dying') {
+          t.shrinkTimer -= dt;
+          if (t.shrinkTimer <= 0) {
+            t.state = 'dead';
+            t.mesh.visible = false;
+          } else {
+            t.mesh.scale.setScalar(t.shrinkTimer / TARGET_SHRINK_TIME);
+          }
+        }
+      }
+
+      // 全部消えたら一定時間後にまとめて復活させる
+      if (targetRespawnTimer > 0) {
+        targetRespawnTimer -= dt;
+        if (targetRespawnTimer <= 0) targets.forEach(resetTarget);
+      } else if (targets.every((t) => t.state === 'dead')) {
+        targetRespawnTimer = TARGET_RESPAWN_DELAY;
+      }
+    }
 
     // =========================================================
     // 主人公（青いカプセル）
@@ -288,6 +409,99 @@
     jumpEl.addEventListener('pointerup', releaseJump);
     jumpEl.addEventListener('pointercancel', releaseJump);
     jumpEl.addEventListener('pointerleave', releaseJump);
+
+    // =========================================================
+    // 矢
+    // 細い円柱＋先端の円錐。+Z 方向が先端になるよう形状を回転させておき、
+    // 発射時に Y 軸回転だけで向きを合わせる。
+    // =========================================================
+    const ARROW_LENGTH = 0.8;
+    const arrowShaftGeometry = new THREE.CylinderGeometry(0.03, 0.03, ARROW_LENGTH, 6);
+    arrowShaftGeometry.rotateX(Math.PI / 2); // 円柱の軸を Y → Z に向ける
+    const arrowTipGeometry = new THREE.ConeGeometry(0.07, 0.18, 8);
+    arrowTipGeometry.rotateX(Math.PI / 2);   // 円錐の先端を +Z に向ける
+    arrowTipGeometry.translate(0, 0, ARROW_LENGTH / 2 + 0.09);
+    const arrowShaftMaterial = new THREE.MeshStandardMaterial({ color: 0x8a6a40 });
+    const arrowTipMaterial = new THREE.MeshStandardMaterial({ color: 0xdddddd });
+
+    const arrows = [];      // 飛んでいる矢 { mesh, dir, life }
+    let shootCooldown = 0;  // 次に撃てるまでの残り時間
+
+    // 矢を1本撃つ（クールダウン中なら何もしない）
+    function shoot() {
+      if (shootCooldown > 0) return;
+      shootCooldown = SHOOT_COOLDOWN;
+
+      // カメラが向いている水平方向へ撃ち、プレイヤーの体も即座にその方向へ向ける
+      const dir = new THREE.Vector3(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
+      player.facing = cameraYaw;
+
+      const mesh = new THREE.Group();
+      mesh.add(new THREE.Mesh(arrowShaftGeometry, arrowShaftMaterial));
+      mesh.add(new THREE.Mesh(arrowTipGeometry, arrowTipMaterial));
+      mesh.rotation.y = cameraYaw;
+      // 体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
+      mesh.position.copy(player.position).addScaledVector(dir, PLAYER_RADIUS);
+      mesh.position.y += ARROW_HEIGHT;
+      scene.add(mesh);
+      arrows.push({ mesh, dir, life: ARROW_LIFETIME });
+    }
+
+    // 点が箱の中に入っているか
+    function pointInBox(p, box) {
+      return p.x >= box.min.x && p.x <= box.max.x &&
+             p.y >= box.min.y && p.y <= box.max.y &&
+             p.z >= box.min.z && p.z <= box.max.z;
+    }
+
+    // 矢の移動と命中判定
+    const arrowTip = new THREE.Vector3();
+    function updateArrows(dt) {
+      shootCooldown = Math.max(0, shootCooldown - dt);
+
+      for (let i = arrows.length - 1; i >= 0; i--) {
+        const a = arrows[i];
+        a.mesh.position.addScaledVector(a.dir, ARROW_SPEED * dt);
+        a.life -= dt;
+
+        // 先端の位置で当たり判定（細かい時間刻みで更新しているので、すり抜けにくい）
+        arrowTip.copy(a.mesh.position).addScaledVector(a.dir, ARROW_LENGTH / 2 + 0.18);
+        const hit = colliders.find((box) => pointInBox(arrowTip, box));
+        if (hit && hit.target) damageTarget(hit.target); // 的なら HP を減らす
+
+        // 何かに当たった、または寿命が尽きたら消す
+        if (hit || a.life <= 0) {
+          scene.remove(a.mesh);
+          arrows.splice(i, 1);
+        }
+      }
+    }
+
+    // =========================================================
+    // 入力（射撃）
+    // スマホ：SHOOT ボタン／PC：マウス右クリック または F キー
+    // （マウス左ドラッグは視点操作なので、射撃は右クリックに分けている）
+    // =========================================================
+    const shootEl = document.getElementById('shoot');
+    shootEl.addEventListener('pointerdown', (e) => {
+      shoot();
+      shootEl.classList.add('pressed');
+      e.preventDefault();
+    });
+    const releaseShoot = () => shootEl.classList.remove('pressed');
+    shootEl.addEventListener('pointerup', releaseShoot);
+    shootEl.addEventListener('pointercancel', releaseShoot);
+    shootEl.addEventListener('pointerleave', releaseShoot);
+
+    window.addEventListener('keydown', (e) => {
+      // キーの押しっぱなしによる自動リピートでは撃たない（1回押すごとに1本）
+      if (e.code === 'KeyF' && !e.repeat) shoot();
+    });
+    // 右クリック。左ドラッグ中でも撃てるよう、pointerdown ではなく mousedown で拾う
+    // （左ボタンを押したまま右ボタンを押しても pointerdown は発生しないため）
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (e.button === 2) shoot();
+    });
 
     // 長押しメニューなどが出ないようにする
     window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -556,7 +770,12 @@
       // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
       const dt = Math.min(clock.getDelta(), 0.1);
       const steps = Math.ceil(dt / MAX_SUBSTEP);
-      for (let i = 0; i < steps; i++) update(dt / steps);
+      for (let i = 0; i < steps; i++) {
+        update(dt / steps);
+        updateArrows(dt / steps);
+      }
+      updateTargets(dt);
+      shootEl.classList.toggle('cooling', shootCooldown > 0);
 
       // 見た目を物理状態に合わせる
       playerMesh.position.copy(player.position);
