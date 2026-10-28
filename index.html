@@ -186,7 +186,7 @@
 </head>
 <body>
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.8</div>
+  <div id="version">v0.9</div>
   <div id="sound">🔊</div>
   <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F ・ 鏡で矢を反射させて的をまとめて射抜こう</div>
   <div id="stick"><div id="stick-knob"></div></div>
@@ -251,12 +251,19 @@
     const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
     const ARROW_LIFETIME = 5.0;     // 矢が消えるまでの時間 [秒]（重力なしでまっすぐ飛び続ける）
     const ARROW_MAX_REFLECTIONS = 5; // 1本の矢が鏡で反射できる最大回数（これを超えて鏡に当たると消える）
+    const GUIDE_REFLECTIONS = 1;    // 撃つ前の予測線で見せる反射の回数（その先は反射直後の短い線だけ）
+    const GUIDE_AFTER_LENGTH = 1.0; // 最後に見せる反射の直後に描く短い線の長さ [m]
+    const GUIDE_OPACITY = 0.35;     // 予測線の濃さ（0〜1）
+    const TRAIL_OPACITY = 0.7;      // 飛んでいる矢の光の尾の濃さ（0〜1）
+    const TRAIL_FADE_TIME = 1.0;    // 矢が消えてから光の尾が消えるまでの時間 [秒]
+    const STAGE_HALF = 30;          // マップの半分の大きさ [m]（地面は 60m 四方）。矢がこの外に出たらすぐ消す
+    const STAGE_CEILING = 40;       // 矢がこれより高く飛んだらマップの外とみなして消す [m]
     const ARROW_HEIGHT = 1.3;       // 矢を撃ち出す高さ（足元基準。胸の高さ）
     const CROSSHAIR_RAISE = 0.15;   // 照準を画面中央からどれだけ上に置くか（画面の高さに対する割合）
     const AIM_FAR_DISTANCE = 100;   // 照準の先に何もないとき（空など）に狙う地点までの距離 [m]
     const AIM_ASSIST_ANGLE = 10;    // エイムアシストが効く、照準からの角度 [度]（0でアシストなし）
     const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
-    const TARGET_HP = 3;            // 的のHP
+    const TARGET_HP = 1;            // 的のHP（1なら矢が1回当たれば消える）
     const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
     const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]
     const TARGET_RESPAWN_DELAY = 3.0; // 的が全部消えてから復活するまでの時間 [秒]
@@ -542,7 +549,7 @@
     }
 
     // 地面：灰色の大きな板（上面が y=0 になるよう、厚みぶん下にずらす）
-    addBox(0, -1, 0, 60, 1, 60, 0x888888);
+    addBox(0, -1, 0, STAGE_HALF * 2, 1, STAGE_HALF * 2, 0x888888);
 
     // 段差になる箱を3つ（低い→中くらい→高いの順で階段状に登れる配置）
     addBox(-4, 0, 6, 4, 0.3, 4, 0xb0b0b0);  // 低い段差：歩くだけで乗れる
@@ -807,12 +814,9 @@
     const arrows = [];      // 飛んでいる矢 { mesh, dir, life, reflections, hitTargets }
     let shootCooldown = 0;  // 次に撃てるまでの残り時間
 
-    // 矢を1本撃つ（クールダウン中なら何もしない）
-    function shoot() {
-      if (shootCooldown > 0) return;
-      shootCooldown = SHOOT_COOLDOWN;
-      playSound('shoot');
-
+    // 今撃ったら矢がどう飛び出すかを計算する（予測線と実際の射撃で共通）
+    // 戻り値：{ aim: 照準の情報, dir: 飛ぶ向き, position: 矢の中心の初期位置, tip: 矢の先端の初期位置 }
+    function computeShot() {
       // 胸の高さから、照準の先（またはエイムアシストで選んだ的）へ向けて撃つ
       const aim = computeAim();
       const origin = player.position.clone();
@@ -821,7 +825,19 @@
       // 狙う地点が近すぎる（足元などを狙った）ときは、向きが不安定になるのでカメラの視線方向へ撃つ
       if (dir.length() < 1.5) dir.copy(aim.rayDir);
       dir.normalize();
+      // 体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
+      const position = origin.addScaledVector(dir, PLAYER_RADIUS);
+      const tip = position.clone().addScaledVector(dir, ARROW_TIP_OFFSET);
+      return { aim, dir, position, tip };
+    }
 
+    // 矢を1本撃つ（クールダウン中なら何もしない）
+    function shoot() {
+      if (shootCooldown > 0) return;
+      shootCooldown = SHOOT_COOLDOWN;
+      playSound('shoot');
+
+      const { dir, position, tip } = computeShot();
       // プレイヤーの体も即座に撃つ方向（水平成分）へ向ける
       player.facing = Math.atan2(dir.x, dir.z);
 
@@ -829,8 +845,7 @@
       mesh.add(new THREE.Mesh(arrowShaftGeometry, arrowShaftMaterial));
       mesh.add(new THREE.Mesh(arrowTipGeometry, arrowTipMaterial));
       mesh.quaternion.setFromUnitVectors(ARROW_FORWARD, dir);
-      // 体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
-      mesh.position.copy(origin).addScaledVector(dir, PLAYER_RADIUS);
+      mesh.position.copy(position);
       scene.add(mesh);
       arrows.push({
         mesh,
@@ -838,6 +853,8 @@
         life: ARROW_LIFETIME,
         reflections: 0,        // 鏡で反射した回数
         hitTargets: new Set(), // この矢がすでに抜いた的（同じ的に2回当たらないように）
+        trail: createTrail(tip), // 光の尾
+        sinceCorner: 0,        // 発射・最後の反射から進んだ距離（尾の描き方に使う）
       });
     }
     const ARROW_FORWARD = new THREE.Vector3(0, 0, 1); // 矢のモデルの先端方向
@@ -882,10 +899,11 @@
     }
 
     // レイが最初に当たる物（地形・的・鏡）を探す。鏡に当たったときは mirror が入る
-    function raycastColliders(origin, dir, tMin, tMax, ignore = null) {
+    // skipTargets を true にすると的を無視する（矢は的を貫通するので、軌道の計算ではこちらを使う）
+    function raycastColliders(origin, dir, tMin, tMax, ignore = null, skipTargets = false) {
       let best = null;
       for (const box of colliders) {
-        if (box === ignore) continue;
+        if (box === ignore || (skipTargets && box.target)) continue;
         const t = rayBox(origin, dir, box, tMin, best ? best.t : tMax);
         if (t !== null) best = { box, t };
       }
@@ -973,17 +991,83 @@
       return best;
     }
 
-    // 矢を消す。1つ以上の的を抜いていたら「×N HIT!」を表示する
+    // 矢を消す。1つ以上の的を抜いていたら「×N HIT!」を表示する。光の尾は薄くしながら消していく
     function removeArrow(index) {
       const a = arrows[index];
       scene.remove(a.mesh);
       arrows.splice(index, 1);
+      fadingTrails.push({ trail: a.trail, time: TRAIL_FADE_TIME });
       if (a.hitTargets.size > 0) showHitCount(a.hitTargets.size);
+    }
+
+    // 点がマップの外（地面の範囲外、または高すぎる）にあるか
+    function isOutsideStage(p) {
+      return Math.abs(p.x) > STAGE_HALF || Math.abs(p.z) > STAGE_HALF || p.y > STAGE_CEILING;
+    }
+
+    // =========================================================
+    // 光の尾（矢の軌跡）
+    // 発射位置 → 反射した点 → … → 今の矢の後ろ、を結ぶ折れ線として描く。
+    // 加算合成で光って見えるようにし、矢が消えたら1秒かけて薄くして消す。
+    // =========================================================
+    const TRAIL_MAX_POINTS = ARROW_MAX_REFLECTIONS + 2; // 発射位置＋反射点＋今の位置
+    const fadingTrails = []; // 消えかけの尾 { trail, time }
+
+    function createTrail(start) {
+      const positions = new Float32Array(TRAIL_MAX_POINTS * 3);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.LineBasicMaterial({
+        color: 0xffe9a0,
+        transparent: true,
+        opacity: TRAIL_OPACITY,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(geometry, material);
+      line.frustumCulled = false; // 頂点を毎フレーム書き換えるので、画面外判定で消えないようにする
+      scene.add(line);
+      const trail = { line, positions, count: 1 };
+      positions.set([start.x, start.y, start.z], 0);
+      setTrailHead(trail, start);
+      return trail;
+    }
+
+    // 折れ線の最後の点（今の矢の後ろ）を更新する
+    function setTrailHead(trail, p) {
+      trail.positions.set([p.x, p.y, p.z], trail.count * 3);
+      trail.line.geometry.setDrawRange(0, trail.count + 1);
+      trail.line.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // 反射した点を折れ線の曲がり角として確定させる
+    function addTrailCorner(trail, p) {
+      if (trail.count + 1 >= TRAIL_MAX_POINTS) return;
+      trail.positions.set([p.x, p.y, p.z], trail.count * 3);
+      trail.count++;
+      setTrailHead(trail, p);
+    }
+
+    // 消えかけの尾を薄くしていき、透明になったら取り除く
+    function updateFadingTrails(dt) {
+      for (let i = fadingTrails.length - 1; i >= 0; i--) {
+        const f = fadingTrails[i];
+        f.time -= dt;
+        if (f.time > 0) {
+          f.trail.line.material.opacity = TRAIL_OPACITY * (f.time / TRAIL_FADE_TIME);
+          continue;
+        }
+        scene.remove(f.trail.line);
+        f.trail.line.geometry.dispose();
+        f.trail.line.material.dispose();
+        fadingTrails.splice(i, 1);
+      }
     }
 
     // 矢の移動・鏡での反射・命中判定
     const arrowTip = new THREE.Vector3();
     const prevTip = new THREE.Vector3();
+    const trailHead = new THREE.Vector3();
     function updateArrows(dt) {
       shootCooldown = Math.max(0, shootCooldown - dt);
 
@@ -994,6 +1078,7 @@
         a.mesh.position.addScaledVector(a.dir, ARROW_SPEED * dt);
         arrowTip.copy(a.mesh.position).addScaledVector(a.dir, ARROW_TIP_OFFSET);
         a.life -= dt;
+        a.sinceCorner += ARROW_SPEED * dt;
 
         // ---- 鏡 ----
         const mirrorHit = findMirrorHit(prevTip, arrowTip);
@@ -1013,24 +1098,105 @@
           arrowTip.copy(mirrorHit.point).addScaledVector(a.dir, mirrorHit.remaining);
           a.mesh.position.copy(arrowTip).addScaledVector(a.dir, -ARROW_TIP_OFFSET);
           a.mesh.quaternion.setFromUnitVectors(ARROW_FORWARD, a.dir);
+          // 光の尾：反射した点を曲がり角にする
+          addTrailCorner(a.trail, mirrorHit.point);
+          a.sinceCorner = mirrorHit.remaining;
         }
+
+        // 光の尾の先端は矢の後ろ端に合わせる（反射直後は曲がり角より手前に戻らないようにする）
+        trailHead.copy(arrowTip).addScaledVector(a.dir, -Math.min(a.sinceCorner, ARROW_TIP_OFFSET + ARROW_LENGTH / 2));
+        setTrailHead(a.trail, trailHead);
 
         // ---- 的・地形 ----
         // 先端の位置で当たり判定（細かい時間刻みで更新しているので、すり抜けにくい）
         let hitWall = false;
+        const newHits = [];
         for (const box of colliders) {
           if (!pointInBox(arrowTip, box)) continue;
           if (!box.target) { hitWall = true; continue; } // 地面・段差・壁
           // 的は貫通する：まだ当たっていない的ならダメージを与え、矢はそのまま進む
-          if (!a.hitTargets.has(box.target)) {
-            a.hitTargets.add(box.target);
-            damageTarget(box.target);
-          }
+          if (!a.hitTargets.has(box.target)) newHits.push(box.target);
+        }
+        // ダメージで的が消えると colliders から外れるので、ループを抜けてから与える
+        for (const target of newHits) {
+          a.hitTargets.add(target);
+          damageTarget(target);
         }
 
-        // 鏡以外に当たった、または寿命が尽きたら消す
-        if (hitWall || a.life <= 0) removeArrow(i);
+        // 鏡以外に当たった、寿命が尽きた、またはマップの外へ出たら消す
+        if (hitWall || a.life <= 0 || isOutsideStage(arrowTip)) removeArrow(i);
       }
+    }
+
+    // =========================================================
+    // 撃つ前の予測線
+    // 照準の方向へ撃ったときの軌道を、GUIDE_REFLECTIONS 回目の反射までと、
+    // その反射直後の短い線（GUIDE_AFTER_LENGTH）だけ薄く表示する。
+    // 的は貫通するので無視し、地面・段差・鏡の縁・マップの外で線を止める。
+    // =========================================================
+    const GUIDE_MAX_POINTS = GUIDE_REFLECTIONS + 2;
+    const guidePositions = new Float32Array(GUIDE_MAX_POINTS * 3);
+    const guideGeometry = new THREE.BufferGeometry();
+    guideGeometry.setAttribute('position', new THREE.BufferAttribute(guidePositions, 3));
+    const guideLine = new THREE.Line(guideGeometry, new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: GUIDE_OPACITY,
+      depthWrite: false,
+    }));
+    guideLine.frustumCulled = false;
+    scene.add(guideLine);
+
+    // レイがマップの外へ出るまでの距離（マップの範囲を表す箱の出口）
+    const stageBox = {
+      min: new THREE.Vector3(-STAGE_HALF, -Infinity, -STAGE_HALF),
+      max: new THREE.Vector3(STAGE_HALF, STAGE_CEILING, STAGE_HALF),
+    };
+    function distanceToStageExit(origin, dir) {
+      let tExit = Infinity;
+      for (const axis of ['x', 'y', 'z']) {
+        const d = dir[axis];
+        if (Math.abs(d) < 1e-9) continue;
+        const bound = d > 0 ? stageBox.max[axis] : stageBox.min[axis];
+        tExit = Math.min(tExit, (bound - origin[axis]) / d);
+      }
+      return Math.max(0, tExit);
+    }
+
+    // 予測線の頂点を計算して書き込む。shot は computeShot() の結果
+    const guideHitLocal = new THREE.Vector3();
+    function updateGuide(shot) {
+      const pos = shot.tip.clone();
+      const dir = shot.dir.clone();
+      let count = 0;
+      const push = (p) => { guidePositions.set([p.x, p.y, p.z], count * 3); count++; };
+      push(pos);
+
+      for (let reflections = 0; ; reflections++) {
+        const maxDist = distanceToStageExit(pos, dir);
+        const hit = raycastColliders(pos, dir, 1e-4, maxDist, null, true);
+        if (!hit) { push(pos.addScaledVector(dir, maxDist)); break; } // マップの外まで何もない
+        pos.addScaledVector(dir, hit.t);
+        push(pos);
+        if (!hit.mirror) break; // 地面・段差に当たったらそこで終わり
+
+        // 鏡の縁なら矢はそこで消えるので、線もそこで終わり
+        toMirrorLocal(hit.mirror, pos, guideHitLocal);
+        if (Math.abs(Math.abs(guideHitLocal.z) - MIRROR_HALF.z) > 1e-4) break;
+        if (reflections >= GUIDE_REFLECTIONS) break; // 見せる反射回数を使い切ったら終わり
+
+        // 反射させる
+        const n = hit.mirror.normal;
+        dir.addScaledVector(n, -2 * dir.dot(n)).normalize();
+        if (reflections + 1 >= GUIDE_REFLECTIONS) {
+          // 最後に見せる反射：その直後の短い線だけ描く（途中で何かに当たればそこまで）
+          const end = raycastColliders(pos, dir, 1e-4, GUIDE_AFTER_LENGTH, null, true);
+          push(pos.clone().addScaledVector(dir, end ? end.t : GUIDE_AFTER_LENGTH));
+          break;
+        }
+      }
+      guideGeometry.setDrawRange(0, count);
+      guideGeometry.attributes.position.needsUpdate = true;
     }
 
     // 「×N HIT!」を画面中央に1秒表示する
@@ -1401,8 +1567,11 @@
       playerMesh.rotation.y = player.facing;
 
       updateCamera(dt);
-      // 照準が的に重なっていれば照準を赤くする
-      crosshairEl.classList.toggle('on-target', !!computeAim().onTarget);
+      // 照準が的に重なっていれば照準を赤くし、予測線を更新する
+      const shot = computeShot();
+      crosshairEl.classList.toggle('on-target', !!shot.aim.onTarget);
+      updateGuide(shot);
+      updateFadingTrails(dt);
       renderer.render(scene, camera);
       requestAnimationFrame(loop);
     }
