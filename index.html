@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <!-- スマホでピンチズームやダブルタップ拡大が起きないようにする -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>3Dアクション試作（グレーボックス）</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #87a9c9;
+      /* スマホでのスクロール・長押し選択・タップハイライトを無効化 */
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+      font-family: sans-serif;
+    }
+    canvas { display: block; }
+
+    /* ===== バーチャルスティック（左下） ===== */
+    #stick {
+      position: fixed;
+      left: calc(24px + env(safe-area-inset-left));
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      width: 130px;
+      height: 130px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.18);
+      border: 2px solid rgba(255, 255, 255, 0.5);
+      touch-action: none;
+    }
+    #stick-knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 56px;
+      height: 56px;
+      margin: -28px 0 0 -28px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.7);
+      pointer-events: none;
+    }
+
+    /* ===== ジャンプボタン（右下） ===== */
+    #jump {
+      position: fixed;
+      right: calc(32px + env(safe-area-inset-right));
+      bottom: calc(40px + env(safe-area-inset-bottom));
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.25);
+      border: 2px solid rgba(255, 255, 255, 0.6);
+      color: #fff;
+      font-size: 18px;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: none;
+    }
+    #jump.pressed { background: rgba(255, 255, 255, 0.55); }
+
+    /* 操作説明（左上） */
+    #help {
+      position: fixed;
+      left: 12px;
+      top: 10px;
+      color: #fff;
+      font-size: 12px;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space</div>
+  <div id="stick"><div id="stick-knob"></div></div>
+  <div id="jump">JUMP</div>
+
+  <!-- Three.js を CDN から ES Module として読み込む -->
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // =========================================================
+    // 調整用パラメータ
+    // =========================================================
+    const PLAYER_RADIUS = 0.5;      // 主人公（カプセル）の半径
+    const PLAYER_HEIGHT = 2.0;      // 主人公の全高（足元〜頭）
+    const MOVE_SPEED = 6.0;         // 最大移動速度 [m/s]
+    const GRAVITY = 25.0;           // 重力加速度 [m/s^2]
+    const JUMP_SPEED = 10.0;        // ジャンプ初速 [m/s]（最高到達点 ≒ 2m）
+    const STEP_HEIGHT = 0.35;       // ジャンプなしで自動的に乗り越えられる段差の高さ
+    const COYOTE_TIME = 0.1;        // 足場から落ちた直後でもジャンプできる猶予 [秒]
+    const JUMP_BUFFER = 0.12;       // 着地直前のジャンプ入力を受け付ける猶予 [秒]
+    const CAMERA_DISTANCE = 7.0;    // カメラと主人公の水平距離
+    const CAMERA_HEIGHT = 3.5;      // カメラの高さ（主人公の足元基準）
+    const CAMERA_FOLLOW = 2.5;      // カメラが主人公の背後へ回り込む速さ
+    const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
+
+    // =========================================================
+    // レンダラー・シーン・カメラの初期化
+    // =========================================================
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // スマホの高解像度画面で重くなりすぎないよう、ピクセル比は最大2に制限
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87a9c9);
+    scene.fog = new THREE.Fog(0x87a9c9, 30, 80);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+
+    // ライト：全体を照らす半球光 ＋ 影を落とす平行光
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 0.8));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(10, 20, 8);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.left = -30;
+    sun.shadow.camera.right = 30;
+    sun.shadow.camera.top = 30;
+    sun.shadow.camera.bottom = -30;
+    scene.add(sun);
+
+    // =========================================================
+    // ステージ（地面と段差の箱）
+    // 当たり判定は全て「軸に平行な箱（AABB）」で管理する
+    // =========================================================
+    const colliders = []; // { min: Vector3, max: Vector3 } の配列
+
+    // 箱を作ってシーンと当たり判定リストの両方に登録する関数
+    // x, z は箱の中心、y は箱の底面の高さ
+    function addBox(x, y, z, w, h, d, color) {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color })
+      );
+      mesh.position.set(x, y + h / 2, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      colliders.push({
+        min: new THREE.Vector3(x - w / 2, y, z - d / 2),
+        max: new THREE.Vector3(x + w / 2, y + h, z + d / 2),
+      });
+      return mesh;
+    }
+
+    // 地面：灰色の大きな板（上面が y=0 になるよう、厚みぶん下にずらす）
+    addBox(0, -1, 0, 60, 1, 60, 0x888888);
+
+    // 段差になる箱を3つ（低い→中くらい→高いの順で階段状に登れる配置）
+    addBox(-4, 0, 6, 4, 0.3, 4, 0xb0b0b0);  // 低い段差：歩くだけで乗れる
+    addBox(0, 0, 10, 4, 1.2, 4, 0xa0a0a0);  // 中くらい：ジャンプで乗る
+    addBox(4, 0, 14, 4, 2.4, 4, 0x909090);  // 高い：中くらいの箱からジャンプで乗る
+
+    // =========================================================
+    // 主人公（青いカプセル）
+    // player.position は「足元の中心」を表す
+    // =========================================================
+    const player = {
+      position: new THREE.Vector3(0, 0, 0),
+      velocity: new THREE.Vector3(),
+      onGround: false,
+      coyoteTimer: 0,     // 地面を離れてからの猶予タイマー
+      jumpBufferTimer: 0, // ジャンプ入力の先行受付タイマー
+      facing: 0,          // 向いている方向（Y軸回転、ラジアン）
+    };
+    const SPAWN_POINT = new THREE.Vector3(0, 0, 0);
+
+    // 見た目用のグループ（足元基準で配置するため、カプセル本体は上にずらす）
+    const playerMesh = new THREE.Group();
+    const capsule = new THREE.Mesh(
+      // CapsuleGeometry(半径, 円柱部分の長さ) → 全高 = 長さ + 半径*2
+      new THREE.CapsuleGeometry(PLAYER_RADIUS, PLAYER_HEIGHT - PLAYER_RADIUS * 2, 8, 16),
+      new THREE.MeshStandardMaterial({ color: 0x2f6fe0 })
+    );
+    capsule.position.y = PLAYER_HEIGHT / 2;
+    capsule.castShadow = true;
+    playerMesh.add(capsule);
+
+    // 向きが分かるように、顔の位置に小さな箱を付ける
+    const nose = new THREE.Mesh(
+      new THREE.BoxGeometry(0.3, 0.2, 0.3),
+      new THREE.MeshStandardMaterial({ color: 0xffffff })
+    );
+    nose.position.set(0, PLAYER_HEIGHT * 0.75, PLAYER_RADIUS);
+    playerMesh.add(nose);
+    scene.add(playerMesh);
+
+    // =========================================================
+    // 入力（キーボード）
+    // =========================================================
+    const keys = {};
+    window.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+      if (e.code === 'Space') {
+        requestJump();
+        e.preventDefault(); // スペースでページがスクロールしないように
+      }
+    });
+    window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+    // ウィンドウからフォーカスが外れたらキー状態をリセット（押しっぱなし防止）
+    window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+    // ジャンプ要求：すぐに跳ぶのではなく、バッファに入れて次の更新で判定する
+    function requestJump() {
+      player.jumpBufferTimer = JUMP_BUFFER;
+    }
+
+    // =========================================================
+    // 入力（バーチャルスティック）
+    // Pointer Events を使い、マルチタッチでも指ごとに管理する
+    // =========================================================
+    const stickEl = document.getElementById('stick');
+    const knobEl = document.getElementById('stick-knob');
+    const stick = { x: 0, y: 0, pointerId: null }; // x: 右が+、y: 上（前進）が+
+    const STICK_RANGE = 50; // ノブが動ける最大距離 [px]
+
+    function updateStick(e) {
+      const rect = stickEl.getBoundingClientRect();
+      let dx = e.clientX - (rect.left + rect.width / 2);
+      let dy = e.clientY - (rect.top + rect.height / 2);
+      const len = Math.hypot(dx, dy);
+      // 円の外に出たら縁に押し戻す
+      if (len > STICK_RANGE) {
+        dx *= STICK_RANGE / len;
+        dy *= STICK_RANGE / len;
+      }
+      knobEl.style.transform = `translate(${dx}px, ${dy}px)`;
+      stick.x = dx / STICK_RANGE;
+      stick.y = -dy / STICK_RANGE; // 画面の上方向を前進にする
+    }
+
+    function resetStick() {
+      stick.x = 0;
+      stick.y = 0;
+      stick.pointerId = null;
+      knobEl.style.transform = '';
+    }
+
+    stickEl.addEventListener('pointerdown', (e) => {
+      if (stick.pointerId !== null) return;
+      stick.pointerId = e.pointerId;
+      // 指がスティックの外に出ても追従し続けるようにキャプチャする
+      stickEl.setPointerCapture(e.pointerId);
+      updateStick(e);
+      e.preventDefault();
+    });
+    stickEl.addEventListener('pointermove', (e) => {
+      if (e.pointerId === stick.pointerId) updateStick(e);
+    });
+    const endStick = (e) => { if (e.pointerId === stick.pointerId) resetStick(); };
+    stickEl.addEventListener('pointerup', endStick);
+    stickEl.addEventListener('pointercancel', endStick);
+
+    // =========================================================
+    // 入力（ジャンプボタン）
+    // =========================================================
+    const jumpEl = document.getElementById('jump');
+    jumpEl.addEventListener('pointerdown', (e) => {
+      requestJump();
+      jumpEl.classList.add('pressed');
+      e.preventDefault();
+    });
+    const releaseJump = () => jumpEl.classList.remove('pressed');
+    jumpEl.addEventListener('pointerup', releaseJump);
+    jumpEl.addEventListener('pointercancel', releaseJump);
+    jumpEl.addEventListener('pointerleave', releaseJump);
+
+    // 長押しメニューなどが出ないようにする
+    window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // 入力をまとめて「-1〜1 の2次元ベクトル」として取得する
+    function getMoveInput() {
+      let x = 0, y = 0;
+      if (keys['KeyW'] || keys['ArrowUp']) y += 1;
+      if (keys['KeyS'] || keys['ArrowDown']) y -= 1;
+      if (keys['KeyD'] || keys['ArrowRight']) x += 1;
+      if (keys['KeyA'] || keys['ArrowLeft']) x -= 1;
+      // キー入力が無ければスティックの値を使う
+      if (x === 0 && y === 0) {
+        x = stick.x;
+        y = stick.y;
+      }
+      // 斜め入力で速くならないよう長さを1以下に制限
+      const len = Math.hypot(x, y);
+      if (len > 1) { x /= len; y /= len; }
+      return { x, y };
+    }
+
+    // =========================================================
+    // 当たり判定
+    // 主人公は「円柱（半径 PLAYER_RADIUS、高さ PLAYER_HEIGHT）」として扱う
+    // =========================================================
+
+    // 主人公と箱が高さ方向で重なっているか
+    function overlapsY(box, feetY) {
+      const EPS = 0.001;
+      return feetY < box.max.y - EPS && feetY + PLAYER_HEIGHT > box.min.y + EPS;
+    }
+
+    // XZ平面で、円（主人公）と矩形（箱の上から見た形）が重なっているか
+    function overlapsXZ(box, px, pz, radius = PLAYER_RADIUS) {
+      const cx = THREE.MathUtils.clamp(px, box.min.x, box.max.x);
+      const cz = THREE.MathUtils.clamp(pz, box.min.z, box.max.z);
+      const dx = px - cx, dz = pz - cz;
+      return dx * dx + dz * dz < radius * radius;
+    }
+
+    // 水平方向の衝突解決：箱にめり込んでいたら押し出す（低い段差なら上に乗せる）
+    function resolveHorizontal() {
+      const p = player.position;
+      for (const box of colliders) {
+        if (!overlapsY(box, p.y)) continue;
+        if (!overlapsXZ(box, p.x, p.z)) continue;
+
+        // 低い段差は、接地中なら自動的に上に乗る（階段のような挙動）
+        const stepUp = box.max.y - p.y;
+        if (player.onGround && stepUp > 0 && stepUp <= STEP_HEIGHT && !hitsCeiling(box.max.y)) {
+          p.y = box.max.y;
+          continue;
+        }
+
+        // 円と矩形の最近接点から押し出し方向を求める
+        const cx = THREE.MathUtils.clamp(p.x, box.min.x, box.max.x);
+        const cz = THREE.MathUtils.clamp(p.z, box.min.z, box.max.z);
+        let dx = p.x - cx, dz = p.z - cz;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 1e-6) {
+          // 円の中心が箱の外：最近接点から半径ぶん離す
+          const push = PLAYER_RADIUS - dist;
+          p.x += (dx / dist) * push;
+          p.z += (dz / dist) * push;
+        } else {
+          // 円の中心が箱の内側に入ってしまった場合：一番近い面の方向へ押し出す
+          const left = p.x - box.min.x, right = box.max.x - p.x;
+          const back = p.z - box.min.z, front = box.max.z - p.z;
+          const m = Math.min(left, right, back, front);
+          if (m === left) p.x = box.min.x - PLAYER_RADIUS;
+          else if (m === right) p.x = box.max.x + PLAYER_RADIUS;
+          else if (m === back) p.z = box.min.z - PLAYER_RADIUS;
+          else p.z = box.max.z + PLAYER_RADIUS;
+        }
+      }
+    }
+
+    // 段差に乗った先で頭がつかえないか（天井チェック）
+    function hitsCeiling(newFeetY) {
+      const p = player.position;
+      for (const box of colliders) {
+        if (overlapsY(box, newFeetY) && overlapsXZ(box, p.x, p.z)) return true;
+      }
+      return false;
+    }
+
+    // 垂直方向の移動と衝突解決：着地・頭ぶつけを判定する
+    function moveVertical(dy) {
+      const p = player.position;
+      const prevY = p.y;
+      p.y += dy;
+      player.onGround = false;
+
+      for (const box of colliders) {
+        if (!overlapsXZ(box, p.x, p.z)) continue;
+
+        if (dy <= 0) {
+          // 落下中：前フレームで箱の上面より上にいて、今フレームで上面を下回った → 着地
+          if (prevY >= box.max.y - 0.001 && p.y <= box.max.y) {
+            p.y = box.max.y;
+            player.velocity.y = 0;
+            player.onGround = true;
+          }
+        } else {
+          // 上昇中：頭が箱の底面を突き抜けた → 頭をぶつけて止まる
+          const prevHead = prevY + PLAYER_HEIGHT;
+          const head = p.y + PLAYER_HEIGHT;
+          if (prevHead <= box.min.y + 0.001 && head > box.min.y) {
+            p.y = box.min.y - PLAYER_HEIGHT;
+            player.velocity.y = 0;
+          }
+        }
+      }
+    }
+
+    // =========================================================
+    // ゲームの更新処理
+    // =========================================================
+    let cameraYaw = 0; // カメラの水平角度（0のとき +Z 方向を向く）
+
+    function update(dt) {
+      // ---- 入力をカメラ基準の移動方向に変換 ----
+      const input = getMoveInput();
+      // カメラの前方向と右方向（XZ平面上）
+      const fx = Math.sin(cameraYaw), fz = Math.cos(cameraYaw);
+      const rx = -Math.cos(cameraYaw), rz = Math.sin(cameraYaw);
+      const moveX = fx * input.y + rx * input.x;
+      const moveZ = fz * input.y + rz * input.x;
+      const moveLen = Math.hypot(moveX, moveZ);
+
+      player.velocity.x = moveX * MOVE_SPEED;
+      player.velocity.z = moveZ * MOVE_SPEED;
+
+      // 移動しているときは進行方向へ向きを滑らかに変える
+      if (moveLen > 0.05) {
+        const target = Math.atan2(moveX, moveZ);
+        player.facing = lerpAngle(player.facing, target, 1 - Math.exp(-15 * dt));
+      }
+
+      // ---- ジャンプ判定（コヨーテタイム＋先行入力バッファ） ----
+      player.coyoteTimer = player.onGround ? COYOTE_TIME : player.coyoteTimer - dt;
+      player.jumpBufferTimer -= dt;
+      if (player.jumpBufferTimer > 0 && player.coyoteTimer > 0) {
+        player.velocity.y = JUMP_SPEED;
+        player.onGround = false;
+        player.coyoteTimer = 0;
+        player.jumpBufferTimer = 0;
+      }
+
+      // ---- 重力 ----
+      player.velocity.y -= GRAVITY * dt;
+
+      // ---- 移動と衝突解決（水平 → 垂直の順に処理） ----
+      player.position.x += player.velocity.x * dt;
+      player.position.z += player.velocity.z * dt;
+      resolveHorizontal();
+      moveVertical(player.velocity.y * dt);
+
+      // ---- 落下したらスタート地点へ戻す ----
+      if (player.position.y < FALL_LIMIT) {
+        player.position.copy(SPAWN_POINT);
+        player.velocity.set(0, 0, 0);
+      }
+
+      // ---- カメラの向きを主人公の背後へ徐々に回り込ませる ----
+      // カメラ側（手前）へ歩いているときに回り込むとグルグル回ってしまうので除外
+      if (moveLen > 0.05) {
+        const towardCamera = (moveX * fx + moveZ * fz) / moveLen < -0.5;
+        if (!towardCamera) {
+          cameraYaw = lerpAngle(cameraYaw, player.facing, 1 - Math.exp(-CAMERA_FOLLOW * moveLen * dt));
+        }
+      }
+    }
+
+    // 角度の補間（-π〜π をまたぐときに遠回りしないようにする）
+    function lerpAngle(a, b, t) {
+      let diff = b - a;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      return a + diff * t;
+    }
+
+    // =========================================================
+    // 三人称カメラ：主人公の後ろ上方から滑らかについていく
+    // =========================================================
+    const cameraTarget = new THREE.Vector3();
+    const cameraGoal = new THREE.Vector3();
+
+    function updateCamera(dt, snap = false) {
+      const p = player.position;
+      // 主人公の後方（カメラの前方向の逆）に置く
+      cameraGoal.set(
+        p.x - Math.sin(cameraYaw) * CAMERA_DISTANCE,
+        p.y + CAMERA_HEIGHT,
+        p.z - Math.cos(cameraYaw) * CAMERA_DISTANCE
+      );
+      if (snap) camera.position.copy(cameraGoal);
+      else camera.position.lerp(cameraGoal, 1 - Math.exp(-8 * dt));
+
+      // 主人公の胸あたりを注視する
+      cameraTarget.set(p.x, p.y + PLAYER_HEIGHT * 0.6, p.z);
+      camera.lookAt(cameraTarget);
+    }
+
+    // =========================================================
+    // メインループ
+    // =========================================================
+    const clock = new THREE.Clock();
+    const MAX_SUBSTEP = 1 / 120; // 高速移動ですり抜けないよう、細かく分割して更新
+
+    updateCamera(0, true);
+
+    function loop() {
+      // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
+      const dt = Math.min(clock.getDelta(), 0.1);
+      const steps = Math.ceil(dt / MAX_SUBSTEP);
+      for (let i = 0; i < steps; i++) update(dt / steps);
+
+      // 見た目を物理状態に合わせる
+      playerMesh.position.copy(player.position);
+      playerMesh.rotation.y = player.facing;
+
+      updateCamera(dt);
+      renderer.render(scene, camera);
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    // 画面サイズ変更（スマホの回転含む）に対応
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
