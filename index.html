@@ -143,28 +143,91 @@
       pointer-events: none;
     }
 
-    /* 操作説明（左上） */
-    #help {
+    /* 左上の表示エリア（操作説明＋HPバーを縦に並べる） */
+    #hud {
       position: fixed;
       left: 12px;
       right: 50px; /* 右上のバージョン表示と重ならないよう空けておく */
       top: 10px;
+      pointer-events: none;
+    }
+    /* 操作説明 */
+    #help {
       color: #fff;
       font-size: 12px;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
-      pointer-events: none;
+    }
+    /* プレイヤーのHPバー（1目盛り＝HP1） */
+    #hp {
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: bold;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    }
+    #hp .label { margin-right: 4px; }
+    #hp .pip {
+      width: 18px;
+      height: 10px;
+      border-radius: 2px;
+      background: #4cd964;
+      box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+    }
+    #hp .pip.empty { background: rgba(0, 0, 0, 0.35); }
+    #hp.low .pip:not(.empty) { background: #ff5a3c; } /* 残りわずかなら赤 */
+
+    /* ===== ゲームオーバー画面 ===== */
+    #gameover {
+      position: fixed;
+      inset: 0;
+      z-index: 10; /* ボタン類より手前に出して、下の操作を受け付けないようにする */
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      background: rgba(0, 0, 0, 0.55);
+      touch-action: none;
+    }
+    #gameover.show { display: flex; }
+    #gameover h1 {
+      margin: 0;
+      color: #fff;
+      font-size: 44px;
+      letter-spacing: 4px;
+      text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+    }
+    #retry {
+      padding: 12px 36px;
+      border: 2px solid #fff;
+      border-radius: 28px;
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
     }
   </style>
 </head>
 <body>
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.6</div>
+  <div id="version">v0.7</div>
   <div id="sound">🔊</div>
-  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
+  <div id="hud">
+    <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
+    <div id="hp"></div>
+  </div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
   <div id="shoot">SHOOT</div>
   <div id="crosshair"></div>
+  <div id="gameover">
+    <h1>GAME OVER</h1>
+    <button id="retry">もう一度</button>
+  </div>
 
   <!-- Three.js を CDN から ES Module として読み込む -->
   <script type="importmap">
@@ -185,6 +248,22 @@
     const STEP_HEIGHT = 0.35;       // ジャンプなしで自動的に乗り越えられる段差の高さ
     const COYOTE_TIME = 0.1;        // 足場から落ちた直後でもジャンプできる猶予 [秒]
     const JUMP_BUFFER = 0.12;       // 着地直前のジャンプ入力を受け付ける猶予 [秒]
+    const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
+
+    // ---- 敵・プレイヤーのHP ----
+    const ENEMY_SPEED = MOVE_SPEED * 0.6; // 敵の歩く速さ [m/s]（プレイヤーの6割）
+    const ENEMY_HP = 2;             // 敵のHP
+    const ENEMY_MAX = 3;            // 同時に出す敵の最大数
+    const ENEMY_SIZE = 0.8;         // 敵（紫の箱）の大きさ [m]
+    const ENEMY_RESPAWN_DELAY = 3.0; // 敵を倒してから次の敵が出るまでの時間 [秒]
+    const ENEMY_SPAWN_MIN_DISTANCE = 10; // 敵の出現位置はプレイヤーからこれ以上離す [m]
+    const ENEMY_SPAWN_EDGE = 27;    // 敵が出現するマップ端の位置（地面は ±30m）
+    const PLAYER_MAX_HP = 5;        // プレイヤーのHP
+    const INVINCIBLE_TIME = 1.0;    // ダメージ後の無敵時間 [秒]
+    const KNOCKBACK_SPEED = 8.0;    // ダメージで吹き飛ぶ水平方向の初速 [m/s]
+    const KNOCKBACK_UP = 5.0;       // ダメージで吹き飛ぶときの上向きの初速 [m/s]
+    const KNOCKBACK_DECAY = 5.0;    // 吹き飛びの減衰の速さ（大きいほどすぐ止まる）
+
     const CAMERA_DISTANCE = 7.5;    // カメラと注視点（主人公の胸あたり）の距離
     const CAMERA_PITCH_INIT = 0.3;  // カメラの上下角度の初期値 [ラジアン]（0で水平、大きいほど見下ろす）
     const CAMERA_PITCH_MIN = -0.25; // 上下角度の下限（マイナスでカメラが下がり、少し見上げられる。地面より下へは CAMERA_MIN_Y で止まる）
@@ -204,8 +283,8 @@
     const AIM_ASSIST_ANGLE = 10;    // エイムアシストが効く、照準からの角度 [度]（0でアシストなし）
     const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
     const TARGET_HP = 3;            // 的のHP
-    const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
-    const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]
+    const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]（的・敵共通）
+    const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]（的・敵共通）
     const TARGET_RESPAWN_DELAY = 3.0; // 的が全部消えてから復活するまでの時間 [秒]
     const SE_MASTER_VOLUME = 0.7;   // 効果音全体の音量（0〜1）
     const SE_VOLUMES = {            // 効果音ごとの音量（0〜1、全体音量に掛け合わされる）
@@ -214,6 +293,7 @@
       destroy: 0.6, // 的を倒す「ポンッ」
       jump: 0.35,   // ジャンプ「ピョン」
       land: 0.6,    // 着地「トン」
+      damage: 0.9,  // プレイヤーが敵に触れてダメージ「ドスッ」
     };
     const LAND_SOUND_MIN_SPEED = 4.0; // この落下速度 [m/s] 以上で着地したときだけ着地音を鳴らす
 
@@ -379,6 +459,24 @@
         osc.stop(t + 0.12);
         return [osc];
       },
+      // ドスッ：低いサイン波を深く沈ませ、こもったノイズで重い衝撃感を足す
+      damage(ctx, t, out) {
+        const osc = sweepOsc(ctx, 'sine', t, 120, 40, 0.18);
+        const env = envelope(ctx, t, 1.8, 0.004, 0.22);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.23);
+
+        const thud = noiseSource(ctx);
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 700;
+        const thudEnv = envelope(ctx, t, 1.5, 0.002, 0.09);
+        thud.connect(lp).connect(thudEnv).connect(out);
+        thud.start(t);
+        thud.stop(t + 0.1);
+        return [osc, thud];
+      },
     };
 
     // 効果音を鳴らす
@@ -409,7 +507,6 @@
         };
       }
     }
-    const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
 
     // =========================================================
     // レンダラー・シーン・カメラの初期化
@@ -511,18 +608,39 @@
     });
     let targetRespawnTimer = 0; // 全滅後、復活までの残り時間（0なら待機していない）
 
-    // 矢が的に当たったときの処理
-    function damageTarget(target) {
-      target.hp -= 1;
-      target.flashTimer = TARGET_FLASH_TIME;
+    // 矢が的・敵に当たったときの処理（的と敵で共通）
+    function damageShootable(obj) {
+      obj.hp -= 1;
+      obj.flashTimer = TARGET_FLASH_TIME;
       // 倒したときは「ポンッ」、まだ残っているときは「トッ」
-      playSound(target.hp <= 0 ? 'destroy' : 'hit');
-      if (target.hp <= 0) {
-        target.state = 'dying';
-        target.shrinkTimer = TARGET_SHRINK_TIME;
+      playSound(obj.hp <= 0 ? 'destroy' : 'hit');
+      if (obj.hp <= 0) {
+        obj.state = 'dying';
+        obj.shrinkTimer = TARGET_SHRINK_TIME;
         // 縮み始めた時点で当たり判定から外す（もう矢もプレイヤーも当たらない）
-        colliders.splice(colliders.indexOf(target.collider), 1);
+        const index = colliders.indexOf(obj.collider);
+        if (index >= 0) colliders.splice(index, 1);
+        // 敵なら、一定時間後に次の敵を出す予約をする
+        if (obj.isEnemy) enemySpawnTimers.push(ENEMY_RESPAWN_DELAY);
       }
+    }
+
+    // 被弾時に白く光る演出と、HP0後に縮んで消える演出を進める（的と敵で共通）
+    // 縮み終わって消えたら true を返す
+    function updateShootableEffects(obj, dt) {
+      // 被弾直後は自己発光を白にして光らせる
+      obj.flashTimer = Math.max(0, obj.flashTimer - dt);
+      obj.mesh.material.emissive.setHex(obj.flashTimer > 0 ? 0xffffff : 0x000000);
+
+      if (obj.state !== 'dying') return false;
+      obj.shrinkTimer -= dt;
+      if (obj.shrinkTimer <= 0) {
+        obj.state = 'dead';
+        obj.mesh.visible = false;
+        return true;
+      }
+      obj.mesh.scale.setScalar(obj.shrinkTimer / TARGET_SHRINK_TIME);
+      return false;
     }
 
     // 的を初期状態に戻す
@@ -537,21 +655,7 @@
 
     // 的の演出（光る・縮む）と、全滅時の復活を更新する
     function updateTargets(dt) {
-      for (const t of targets) {
-        // 被弾直後は自己発光を白にして光らせる
-        t.flashTimer = Math.max(0, t.flashTimer - dt);
-        t.mesh.material.emissive.setHex(t.flashTimer > 0 ? 0xffffff : 0x000000);
-
-        if (t.state === 'dying') {
-          t.shrinkTimer -= dt;
-          if (t.shrinkTimer <= 0) {
-            t.state = 'dead';
-            t.mesh.visible = false;
-          } else {
-            t.mesh.scale.setScalar(t.shrinkTimer / TARGET_SHRINK_TIME);
-          }
-        }
-      }
+      for (const t of targets) updateShootableEffects(t, dt);
 
       // 全部消えたら一定時間後にまとめて復活させる
       if (targetRespawnTimer > 0) {
@@ -573,6 +677,9 @@
       coyoteTimer: 0,     // 地面を離れてからの猶予タイマー
       jumpBufferTimer: 0, // ジャンプ入力の先行受付タイマー
       facing: 0,          // 向いている方向（Y軸回転、ラジアン）
+      hp: PLAYER_MAX_HP,
+      invincibleTimer: 0, // ダメージ後の無敵の残り時間
+      knockback: new THREE.Vector3(), // 吹き飛びの水平速度（毎フレーム減衰する）
     };
     const SPAWN_POINT = new THREE.Vector3(0, 0, 0);
 
@@ -597,6 +704,224 @@
     scene.add(playerMesh);
 
     // =========================================================
+    // 敵（紫の箱）
+    // マップの端から出現し、プレイヤーに向かってまっすぐ歩いてくる。段差は登らない。
+    // 敵は動くので colliders には入れず、自分の当たり判定の箱（collider）を毎フレーム更新する。
+    // =========================================================
+    const enemyGeometry = new THREE.BoxGeometry(ENEMY_SIZE, ENEMY_SIZE, ENEMY_SIZE);
+    const ENEMY_HALF = ENEMY_SIZE / 2;
+    const enemies = [];
+    // 次の敵を出すまでの残り時間の一覧（0以下になったものから出現させる）。最初は3体すぐ出す
+    let enemySpawnTimers = Array(ENEMY_MAX).fill(0);
+
+    // 敵の位置（足元の中心）から当たり判定の箱を更新し、見た目の位置も合わせる
+    function syncEnemy(enemy) {
+      const p = enemy.position;
+      enemy.collider.min.set(p.x - ENEMY_HALF, p.y, p.z - ENEMY_HALF);
+      enemy.collider.max.set(p.x + ENEMY_HALF, p.y + ENEMY_SIZE, p.z + ENEMY_HALF);
+      enemy.mesh.position.set(p.x, p.y + ENEMY_HALF, p.z);
+    }
+
+    // 敵（の箱）が地形などの箱と重なっているか。床（上面が足元と同じ高さ）は除く
+    function enemyOverlapsBox(enemy, box) {
+      const c = enemy.collider;
+      const EPS = 0.001;
+      return c.min.x < box.max.x - EPS && c.max.x > box.min.x + EPS &&
+             c.min.y < box.max.y - EPS && c.max.y > box.min.y + EPS &&
+             c.min.z < box.max.z - EPS && c.max.z > box.min.z + EPS;
+    }
+
+    // 敵を地形から押し出す。めり込みが浅い方向（X か Z）へ押し戻すので、壁沿いには滑って進める
+    function resolveEnemyWalls(enemy) {
+      for (const box of colliders) {
+        syncEnemy(enemy);
+        if (!enemyOverlapsBox(enemy, box)) continue;
+        const p = enemy.position;
+        const pushLeft = box.min.x - ENEMY_HALF - p.x;  // マイナス方向へ押し出す量
+        const pushRight = box.max.x + ENEMY_HALF - p.x; // プラス方向へ押し出す量
+        const pushBack = box.min.z - ENEMY_HALF - p.z;
+        const pushFront = box.max.z + ENEMY_HALF - p.z;
+        const px = Math.abs(pushLeft) < Math.abs(pushRight) ? pushLeft : pushRight;
+        const pz = Math.abs(pushBack) < Math.abs(pushFront) ? pushBack : pushFront;
+        if (Math.abs(px) < Math.abs(pz)) p.x += px;
+        else p.z += pz;
+      }
+      syncEnemy(enemy);
+    }
+
+    // 出現位置を探す：マップ端のランダムな地点で、プレイヤーから十分離れていて、何とも重なっていない場所
+    function findEnemySpawnPoint() {
+      const candidate = { position: new THREE.Vector3(), collider: { min: new THREE.Vector3(), max: new THREE.Vector3() }, mesh: { position: new THREE.Vector3() } };
+      for (let i = 0; i < 30; i++) {
+        // 四辺のどれかを選び、その辺上のランダムな位置にする
+        const side = Math.floor(Math.random() * 4);
+        const along = (Math.random() * 2 - 1) * ENEMY_SPAWN_EDGE;
+        const edge = side % 2 === 0 ? ENEMY_SPAWN_EDGE : -ENEMY_SPAWN_EDGE;
+        if (side < 2) candidate.position.set(edge, 0, along);
+        else candidate.position.set(along, 0, edge);
+
+        const dx = candidate.position.x - player.position.x;
+        const dz = candidate.position.z - player.position.z;
+        if (Math.hypot(dx, dz) < ENEMY_SPAWN_MIN_DISTANCE) continue;
+        syncEnemy(candidate);
+        if (colliders.some((box) => enemyOverlapsBox(candidate, box))) continue;
+        if (enemies.some((e) => enemyOverlapsBox(candidate, e.collider))) continue;
+        return candidate.position;
+      }
+      return null; // 見つからなければ次のフレームでもう一度探す
+    }
+
+    // 敵を1体出す。出せなかったら false
+    function spawnEnemy() {
+      const position = findEnemySpawnPoint();
+      if (!position) return false;
+      // 被弾時に個別に光らせるため、マテリアルは敵ごとに作る
+      const mesh = new THREE.Mesh(enemyGeometry, new THREE.MeshStandardMaterial({ color: 0x8a3cc8 }));
+      mesh.castShadow = true;
+      scene.add(mesh);
+      const enemy = {
+        isEnemy: true,
+        mesh,
+        position: position.clone(),
+        hp: ENEMY_HP,
+        state: 'alive',
+        flashTimer: 0,
+        shrinkTimer: 0,
+        collider: { min: new THREE.Vector3(), max: new THREE.Vector3() },
+      };
+      syncEnemy(enemy);
+      enemies.push(enemy);
+      return true;
+    }
+
+    // 敵をシーンから取り除く
+    function removeEnemy(enemy) {
+      scene.remove(enemy.mesh);
+      enemy.mesh.material.dispose();
+      enemies.splice(enemies.indexOf(enemy), 1);
+    }
+
+    // 敵の移動・プレイヤーとの接触判定（物理の細かい時間刻みで呼ぶ）
+    function updateEnemies(dt) {
+      for (const enemy of enemies) {
+        if (enemy.state !== 'alive') continue;
+        const p = enemy.position;
+
+        // プレイヤーに向かってまっすぐ歩く（水平方向のみ）
+        const dx = player.position.x - p.x;
+        const dz = player.position.z - p.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 0.01) {
+          // X と Z を別々に動かして押し出すことで、壁に当たっても沿って進める
+          p.x += (dx / dist) * ENEMY_SPEED * dt;
+          resolveEnemyWalls(enemy);
+          p.z += (dz / dist) * ENEMY_SPEED * dt;
+          resolveEnemyWalls(enemy);
+        }
+
+        // 敵どうしが重ならないよう、重なっていたら互いに離す
+        for (const other of enemies) {
+          if (other === enemy || other.state !== 'alive') continue;
+          const ox = p.x - other.position.x;
+          const oz = p.z - other.position.z;
+          const overlapX = ENEMY_SIZE - Math.abs(ox);
+          const overlapZ = ENEMY_SIZE - Math.abs(oz);
+          if (overlapX <= 0 || overlapZ <= 0) continue;
+          if (overlapX < overlapZ) p.x += Math.sign(ox || 1) * overlapX / 2;
+          else p.z += Math.sign(oz || 1) * overlapZ / 2;
+          resolveEnemyWalls(enemy);
+        }
+
+        // マップの外へは出ない
+        p.x = THREE.MathUtils.clamp(p.x, -29.6, 29.6);
+        p.z = THREE.MathUtils.clamp(p.z, -29.6, 29.6);
+        syncEnemy(enemy);
+
+        // プレイヤーに触れたらダメージ
+        if (overlapsY(enemy.collider, player.position.y) &&
+            overlapsXZ(enemy.collider, player.position.x, player.position.z)) {
+          damagePlayer(enemy);
+        }
+      }
+    }
+
+    // 敵の演出（光る・縮む）と、倒されたあとの再出現を進める（描画フレームごとに呼ぶ）
+    function updateEnemyLifecycle(dt) {
+      for (const enemy of [...enemies]) {
+        if (updateShootableEffects(enemy, dt)) removeEnemy(enemy);
+      }
+      // 予約された出現時間が来たら新しい敵を出す（出せなかったら次のフレームで再挑戦）
+      enemySpawnTimers = enemySpawnTimers.map((t) => t - dt);
+      for (let i = enemySpawnTimers.length - 1; i >= 0; i--) {
+        if (enemySpawnTimers[i] > 0) continue;
+        if (enemies.length >= ENEMY_MAX) break;
+        if (spawnEnemy()) enemySpawnTimers.splice(i, 1);
+      }
+    }
+
+    // =========================================================
+    // プレイヤーのHP・ダメージ・ゲームオーバー
+    // =========================================================
+    const hpEl = document.getElementById('hp');
+    const gameOverEl = document.getElementById('gameover');
+    let isGameOver = false;
+
+    // HPバーを作り直す（目盛り1つ＝HP1）
+    function refreshHpBar() {
+      hpEl.innerHTML = '<span class="label">HP</span>' +
+        Array.from({ length: PLAYER_MAX_HP }, (_, i) =>
+          `<span class="pip${i < player.hp ? '' : ' empty'}"></span>`).join('');
+      hpEl.classList.toggle('low', player.hp <= 1);
+    }
+    refreshHpBar();
+
+    // 敵に触れたときの処理：HPを減らし、敵と反対方向へ吹き飛ばし、しばらく無敵にする
+    function damagePlayer(enemy) {
+      if (player.invincibleTimer > 0 || isGameOver) return;
+      player.hp -= 1;
+      player.invincibleTimer = INVINCIBLE_TIME;
+      playSound('damage');
+      refreshHpBar();
+
+      // 敵 → プレイヤー の向きに吹き飛ばす（真上に重なっていたら向いている方向の逆へ）
+      let kx = player.position.x - enemy.position.x;
+      let kz = player.position.z - enemy.position.z;
+      const len = Math.hypot(kx, kz);
+      if (len < 0.01) { kx = -Math.sin(player.facing); kz = -Math.cos(player.facing); }
+      else { kx /= len; kz /= len; }
+      player.knockback.set(kx * KNOCKBACK_SPEED, 0, kz * KNOCKBACK_SPEED);
+      player.velocity.y = KNOCKBACK_UP;
+      player.onGround = false;
+
+      if (player.hp <= 0) {
+        isGameOver = true;
+        gameOverEl.classList.add('show');
+      }
+    }
+
+    // 「もう一度」：HP・敵・プレイヤー位置をリセットして再開
+    function restartGame() {
+      player.hp = PLAYER_MAX_HP;
+      player.position.copy(SPAWN_POINT);
+      player.velocity.set(0, 0, 0);
+      player.knockback.set(0, 0, 0);
+      player.invincibleTimer = 0;
+      player.jumpBufferTimer = 0;
+      player.facing = 0;
+      cameraYaw = 0;
+      cameraPitch = CAMERA_PITCH_INIT;
+      for (const enemy of [...enemies]) removeEnemy(enemy);
+      enemySpawnTimers = Array(ENEMY_MAX).fill(0);
+      for (const a of arrows) scene.remove(a.mesh);
+      arrows.length = 0;
+      refreshHpBar();
+      isGameOver = false;
+      gameOverEl.classList.remove('show');
+      updateCamera(0, true);
+    }
+    document.getElementById('retry').addEventListener('click', restartGame);
+
+    // =========================================================
     // 入力（キーボード）
     // =========================================================
     const keys = {};
@@ -613,6 +938,7 @@
 
     // ジャンプ要求：すぐに跳ぶのではなく、バッファに入れて次の更新で判定する
     function requestJump() {
+      if (isGameOver) return; // ゲームオーバー中は操作できない
       player.jumpBufferTimer = JUMP_BUFFER;
     }
 
@@ -695,7 +1021,7 @@
 
     // 矢を1本撃つ（クールダウン中なら何もしない）
     function shoot() {
-      if (shootCooldown > 0) return;
+      if (shootCooldown > 0 || isGameOver) return; // ゲームオーバー中は操作できない
       shootCooldown = SHOOT_COOLDOWN;
       playSound('shoot');
 
@@ -764,7 +1090,7 @@
     }
 
     // 今の照準で「どこを狙っているか」を計算する
-    // 戻り値：{ point: 照準の先の地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている的, target: アシストで狙う的 }
+    // 戻り値：{ point: 照準の先の地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている的・敵, target: アシストで狙う的・敵 }
     function computeAim() {
       camera.updateMatrixWorld(); // 描画前でも最新のカメラ位置・向きで計算する
       aimRaycaster.setFromCamera(CROSSHAIR_NDC, camera);
@@ -778,8 +1104,15 @@
       const tStart = Math.max(0, chest.sub(camPos).dot(rayDir));
 
       const hit = raycastColliders(camPos, rayDir, tStart, AIM_FAR_DISTANCE);
-      const point = camPos.clone().addScaledVector(rayDir, hit ? hit.t : AIM_FAR_DISTANCE);
-      const onTarget = hit && hit.box.target ? hit.box.target : null;
+      let hitT = hit ? hit.t : AIM_FAR_DISTANCE;
+      let onTarget = hit && hit.box.target ? hit.box.target : null;
+      // 敵は colliders に入っていないので別に調べ、地形や的より手前なら敵を照準に重なった対象にする
+      for (const enemy of enemies) {
+        if (enemy.state !== 'alive') continue;
+        const t = rayBox(camPos, rayDir, enemy.collider, tStart, hitT);
+        if (t !== null) { hitT = t; onTarget = enemy; }
+      }
+      const point = camPos.clone().addScaledVector(rayDir, hitT);
 
       // エイムアシスト：照準に重なっている的があればそれを優先。
       // なければ、照準から AIM_ASSIST_ANGLE 度以内で一番近い角度の的を選ぶ
@@ -789,14 +1122,14 @@
         const toTarget = new THREE.Vector3();
         const origin = player.position.clone();
         origin.y += ARROW_HEIGHT;
-        for (const t of targets) {
+        for (const t of [...targets, ...enemies]) {
           if (t.state !== 'alive') continue;
           toTarget.copy(t.mesh.position).sub(camPos);
           const along = toTarget.dot(rayDir);
           if (along <= tStart) continue; // プレイヤーより手前（カメラ側）の的は対象外
           const cos = along / toTarget.length();
           if (cos < bestCos) continue;
-          // 遮蔽物チェック：矢の発射位置から的の中心まで、他の箱に遮られていないか
+          // 遮蔽物チェック：矢の発射位置から的・敵の中心まで、他の箱に遮られていないか
           const path = t.mesh.position.clone().sub(origin);
           const dist = path.length();
           path.divideScalar(dist);
@@ -827,8 +1160,10 @@
 
         // 先端の位置で当たり判定（細かい時間刻みで更新しているので、すり抜けにくい）
         arrowTip.copy(a.mesh.position).addScaledVector(a.dir, ARROW_LENGTH / 2 + 0.18);
-        const hit = colliders.find((box) => pointInBox(arrowTip, box));
-        if (hit && hit.target) damageTarget(hit.target); // 的なら HP を減らす
+        const hitEnemy = enemies.find((e) => e.state === 'alive' && pointInBox(arrowTip, e.collider));
+        const hit = hitEnemy ? hitEnemy.collider : colliders.find((box) => pointInBox(arrowTip, box));
+        if (hitEnemy) damageShootable(hitEnemy);          // 敵なら HP を減らす
+        else if (hit && hit.target) damageShootable(hit.target); // 的なら HP を減らす
 
         // 何かに当たった、または寿命が尽きたら消す
         if (hit || a.life <= 0) {
@@ -899,6 +1234,7 @@
 
     canvasEl.addEventListener('pointerdown', (e) => {
       if (look.pointerId !== null) return;          // 視点操作はひとつの指だけで行う
+      if (isGameOver) return;                       // ゲームオーバー中は操作できない
       if (e.pointerType === 'mouse' && e.button !== 0) return; // マウスは左ボタンのみ
       look.pointerId = e.pointerId;
       look.lastX = e.clientX;
@@ -1056,8 +1392,11 @@
       const moveZ = fz * input.y + rz * input.x;
       const moveLen = Math.hypot(moveX, moveZ);
 
-      player.velocity.x = moveX * MOVE_SPEED;
-      player.velocity.z = moveZ * MOVE_SPEED;
+      // 入力による移動に、ダメージの吹き飛びを足す（吹き飛びは徐々に弱まる）
+      player.knockback.multiplyScalar(Math.exp(-KNOCKBACK_DECAY * dt));
+      player.velocity.x = moveX * MOVE_SPEED + player.knockback.x;
+      player.velocity.z = moveZ * MOVE_SPEED + player.knockback.z;
+      player.invincibleTimer = Math.max(0, player.invincibleTimer - dt);
 
       // 移動しているときは進行方向へ向きを滑らかに変える
       if (moveLen > 0.05) {
@@ -1148,21 +1487,30 @@
     function loop() {
       // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
       const dt = Math.min(clock.getDelta(), 0.1);
-      const steps = Math.ceil(dt / MAX_SUBSTEP);
-      for (let i = 0; i < steps; i++) {
-        update(dt / steps);
-        updateArrows(dt / steps);
+      // ゲームオーバー中は世界の時間を止める（表示だけ続ける）
+      if (!isGameOver) {
+        const steps = Math.ceil(dt / MAX_SUBSTEP);
+        for (let i = 0; i < steps; i++) {
+          update(dt / steps);
+          updateArrows(dt / steps);
+          updateEnemies(dt / steps);
+          if (isGameOver) break;
+        }
+        updateTargets(dt);
+        updateEnemyLifecycle(dt);
       }
-      updateTargets(dt);
       shootEl.classList.toggle('cooling', shootCooldown > 0);
 
       // 見た目を物理状態に合わせる
       playerMesh.position.copy(player.position);
       playerMesh.rotation.y = player.facing;
+      // 無敵中は点滅させる（1秒に約8回）
+      playerMesh.visible = player.invincibleTimer <= 0 || Math.floor(player.invincibleTimer * 16) % 2 === 0;
 
       updateCamera(dt);
       // 照準が的に重なっていれば照準を赤くする
       crosshairEl.classList.toggle('on-target', !!computeAim().onTarget);
+      crosshairEl.hidden = isGameOver; // ゲームオーバー画面では照準を隠す
       renderer.render(scene, camera);
       requestAnimationFrame(loop);
     }
