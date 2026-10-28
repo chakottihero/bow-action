@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <!-- スマホでピンチズームやダブルタップ拡大が起きないようにする -->
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <!-- 古いバージョンがキャッシュから表示され続けないよう、index.html をキャッシュさせない指定 -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>3Dアクション試作（グレーボックス）</title>
   <style>
     html, body {
@@ -90,9 +94,21 @@
     #shoot.cooling { opacity: 0.45; }
 
     /* 操作説明（左上） */
+    /* バージョン表示（右上）：どのバージョンが読み込まれているか確認する用 */
+    #version {
+      position: fixed;
+      right: calc(10px + env(safe-area-inset-right));
+      top: calc(8px + env(safe-area-inset-top));
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 11px;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+    }
+
     #help {
       position: fixed;
       left: 12px;
+      right: 50px; /* 右上のバージョン表示と重ならないよう空けておく */
       top: 10px;
       color: #fff;
       font-size: 12px;
@@ -102,6 +118,8 @@
   </style>
 </head>
 <body>
+  <!-- バージョン番号：コミットするたびに数字を上げること -->
+  <div id="version">v0.4</div>
   <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
