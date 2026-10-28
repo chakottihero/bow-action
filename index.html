@@ -93,7 +93,24 @@
     /* クールダウン中は薄く表示して、まだ撃てないことを伝える */
     #shoot.cooling { opacity: 0.45; }
 
-    /* 操作説明（左上） */
+    /* 効果音のON/OFFボタン（右上、バージョン表示の下） */
+    #sound {
+      position: fixed;
+      right: calc(8px + env(safe-area-inset-right));
+      top: calc(26px + env(safe-area-inset-top));
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: none;
+      cursor: pointer;
+    }
+
     /* バージョン表示（右上）：どのバージョンが読み込まれているか確認する用 */
     #version {
       position: fixed;
@@ -105,6 +122,7 @@
       pointer-events: none;
     }
 
+    /* 操作説明（左上） */
     #help {
       position: fixed;
       left: 12px;
@@ -119,7 +137,8 @@
 </head>
 <body>
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.4</div>
+  <div id="version">v0.5</div>
+  <div id="sound">🔊</div>
   <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
@@ -163,6 +182,208 @@
     const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
     const TARGET_SHRINK_TIME = 0.3; // HP0になってから縮んで消えるまでの時間 [秒]
     const TARGET_RESPAWN_DELAY = 3.0; // 的が全部消えてから復活するまでの時間 [秒]
+    const SE_MASTER_VOLUME = 0.7;   // 効果音全体の音量（0〜1）
+    const SE_VOLUMES = {            // 効果音ごとの音量（0〜1、全体音量に掛け合わされる）
+      shoot: 0.5,   // 矢を撃つ「ヒュッ」
+      hit: 0.8,     // 的に当たる「トッ」
+      destroy: 0.6, // 的を倒す「ポンッ」
+      jump: 0.35,   // ジャンプ「ピョン」
+      land: 0.6,    // 着地「トン」
+    };
+    const LAND_SOUND_MIN_SPEED = 4.0; // この落下速度 [m/s] 以上で着地したときだけ着地音を鳴らす
+
+    // =========================================================
+    // 効果音（Web Audio API で音をその場で合成する。音声ファイルは使わない）
+    //
+    // 音割れ対策：
+    //  ・全ての音を マスター音量 → コンプレッサー（リミッター代わり）に通してから出力
+    //  ・音の出だしと終わりは必ず音量を0付近から/まで滑らかに変化させ、プチッというノイズを防ぐ
+    //  ・同じ音は「同時に鳴らせる数」と「最短の再生間隔」を制限して、重なりすぎないようにする
+    // =========================================================
+    const sound = {
+      ctx: null,         // AudioContext（最初のタッチ/キー入力で作る）
+      master: null,      // マスター音量ノード
+      noiseBuffer: null, // 風切り音などに使うホワイトノイズ
+      enabled: true,     // ON/OFF
+      voices: {},        // 効果音ごとの現在の同時再生数
+      lastPlayed: {},    // 効果音ごとの最後に鳴らした時刻
+    };
+    const SE_MAX_VOICES = 3;      // 同じ効果音を同時に鳴らせる最大数
+    const SE_MIN_INTERVAL = 0.03; // 同じ効果音を鳴らす最短間隔 [秒]
+
+    // ON/OFF の設定はブラウザに保存しておく（保存できない環境でも動くよう try で囲む）
+    try { sound.enabled = localStorage.getItem('bow-action-sound') !== 'off'; } catch (e) { /* 何もしない */ }
+
+    // 音声を有効化する。スマホのブラウザはユーザー操作の中でしか音を鳴らし始められないため、
+    // 最初のタッチ/クリック/キー入力のイベント内でこれを呼ぶ
+    function unlockAudio() {
+      if (!sound.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return; // Web Audio 非対応ブラウザでは音なしで遊べるようにする
+        const ctx = new AudioCtx();
+        sound.ctx = ctx;
+
+        // マスター音量 → コンプレッサー → スピーカー
+        const compressor = ctx.createDynamicsCompressor();
+        compressor.threshold.value = -12;
+        compressor.knee.value = 6;
+        compressor.ratio.value = 12;
+        compressor.attack.value = 0.002;
+        compressor.release.value = 0.1;
+        compressor.connect(ctx.destination);
+        sound.master = ctx.createGain();
+        sound.master.gain.value = SE_MASTER_VOLUME;
+        sound.master.connect(compressor);
+
+        // 0.5秒ぶんのホワイトノイズを作っておき、使い回す
+        const length = Math.floor(ctx.sampleRate * 0.5);
+        sound.noiseBuffer = ctx.createBuffer(1, length, ctx.sampleRate);
+        const data = sound.noiseBuffer.getChannelData(0);
+        for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+
+        // iOS Safari 対策：無音を一瞬鳴らしておくと、以降の再生が確実に許可される
+        const silent = ctx.createBufferSource();
+        silent.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+        silent.connect(ctx.destination);
+        silent.start();
+      }
+      if (sound.ctx.state === 'suspended') sound.ctx.resume();
+    }
+    // 最初の操作で有効化。capture: true でボタンやキャンバスより先に受け取る
+    for (const type of ['pointerdown', 'touchend', 'keydown', 'click']) {
+      window.addEventListener(type, unlockAudio, { capture: true, passive: true });
+    }
+
+    // 音量の包絡線（エンベロープ）付きのゲインノードを作る
+    // attack 秒で peak まで上げ、duration 秒かけて0付近まで下げる
+    function envelope(ctx, t, peak, attack, duration) {
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(peak, t + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      return g;
+    }
+
+    // 発振器（ピッチを from → to へ duration 秒で変化させる）
+    function sweepOsc(ctx, type, t, from, to, duration) {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.setValueAtTime(from, t);
+      osc.frequency.exponentialRampToValueAtTime(to, t + duration);
+      return osc;
+    }
+
+    // ノイズ音源
+    function noiseSource(ctx) {
+      const src = ctx.createBufferSource();
+      src.buffer = sound.noiseBuffer;
+      return src;
+    }
+
+    // 効果音ごとの合成レシピ。out（出力先）に繋ぎ、鳴らした音源の配列と長さを返す
+    const SE_RECIPES = {
+      // ヒュッ：ノイズをバンドパスフィルタに通し、中心周波数を高→低へ素早く動かす
+      shoot(ctx, t, out) {
+        const src = noiseSource(ctx);
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.Q.value = 2.5;
+        filter.frequency.setValueAtTime(4000, t);
+        filter.frequency.exponentialRampToValueAtTime(900, t + 0.14);
+        const env = envelope(ctx, t, 3.0, 0.01, 0.16); // フィルタで音が細くなるぶん大きめに
+        src.connect(filter).connect(env).connect(out);
+        src.start(t);
+        src.stop(t + 0.17);
+        return [src];
+      },
+      // トッ：低めの三角波を一瞬で下げる＋ごく短いノイズのアタック
+      hit(ctx, t, out) {
+        const osc = sweepOsc(ctx, 'triangle', t, 320, 110, 0.07);
+        const env = envelope(ctx, t, 1.4, 0.002, 0.09);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.1);
+
+        const click = noiseSource(ctx);
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 1500;
+        const clickEnv = envelope(ctx, t, 0.5, 0.001, 0.025);
+        click.connect(hp).connect(clickEnv).connect(out);
+        click.start(t);
+        click.stop(t + 0.03);
+        return [osc, click];
+      },
+      // ポンッ：高めのサイン波を下げつつ、短いノイズの破裂感を重ねる
+      destroy(ctx, t, out) {
+        const osc = sweepOsc(ctx, 'sine', t, 1100, 380, 0.14);
+        const env = envelope(ctx, t, 1.4, 0.003, 0.18);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.19);
+
+        const burst = noiseSource(ctx);
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = 2500;
+        bp.Q.value = 0.8;
+        const burstEnv = envelope(ctx, t, 0.6, 0.001, 0.06);
+        burst.connect(bp).connect(burstEnv).connect(out);
+        burst.start(t);
+        burst.stop(t + 0.07);
+        return [osc, burst];
+      },
+      // ピョン：矩形波のピッチを低→高へ持ち上げる（ローパスで角を丸めて軽い音に）
+      jump(ctx, t, out) {
+        const osc = sweepOsc(ctx, 'square', t, 280, 760, 0.12);
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 2200;
+        const env = envelope(ctx, t, 1.5, 0.005, 0.15);
+        osc.connect(lp).connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.16);
+        return [osc];
+      },
+      // トン：低いサイン波を短く下げる
+      land(ctx, t, out) {
+        const osc = sweepOsc(ctx, 'sine', t, 150, 55, 0.09);
+        const env = envelope(ctx, t, 1.6, 0.003, 0.11);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.12);
+        return [osc];
+      },
+    };
+
+    // 効果音を鳴らす
+    function playSound(name) {
+      const ctx = sound.ctx;
+      if (!sound.enabled || !ctx || ctx.state !== 'running') return;
+
+      // 同じ音の鳴らしすぎを防ぐ（短すぎる間隔・同時再生数オーバーなら鳴らさない）
+      const now = ctx.currentTime;
+      if (now - (sound.lastPlayed[name] ?? -1) < SE_MIN_INTERVAL) return;
+      if ((sound.voices[name] ?? 0) >= SE_MAX_VOICES) return;
+      sound.lastPlayed[name] = now;
+
+      // 効果音ごとの音量ノードを挟んでマスターへ繋ぐ
+      const out = ctx.createGain();
+      out.gain.value = SE_VOLUMES[name] ?? 1;
+      out.connect(sound.master);
+      const sources = SE_RECIPES[name](ctx, now, out);
+
+      // 再生が全部終わったら同時再生数を戻し、ノードを切り離す
+      sound.voices[name] = (sound.voices[name] ?? 0) + 1;
+      let remaining = sources.length;
+      for (const src of sources) {
+        src.onended = () => {
+          if (--remaining > 0) return;
+          sound.voices[name]--;
+          out.disconnect();
+        };
+      }
+    }
     const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
 
     // =========================================================
@@ -269,6 +490,8 @@
     function damageTarget(target) {
       target.hp -= 1;
       target.flashTimer = TARGET_FLASH_TIME;
+      // 倒したときは「ポンッ」、まだ残っているときは「トッ」
+      playSound(target.hp <= 0 ? 'destroy' : 'hit');
       if (target.hp <= 0) {
         target.state = 'dying';
         target.shrinkTimer = TARGET_SHRINK_TIME;
@@ -449,6 +672,7 @@
     function shoot() {
       if (shootCooldown > 0) return;
       shootCooldown = SHOOT_COOLDOWN;
+      playSound('shoot');
 
       // カメラが向いている水平方向へ撃ち、プレイヤーの体も即座にその方向へ向ける
       const dir = new THREE.Vector3(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
@@ -519,6 +743,19 @@
     // （左ボタンを押したまま右ボタンを押しても pointerdown は発生しないため）
     renderer.domElement.addEventListener('mousedown', (e) => {
       if (e.button === 2) shoot();
+    });
+
+    // =========================================================
+    // 効果音のON/OFFボタン（右上）
+    // =========================================================
+    const soundEl = document.getElementById('sound');
+    const refreshSoundButton = () => { soundEl.textContent = sound.enabled ? '🔊' : '🔇'; };
+    refreshSoundButton();
+    soundEl.addEventListener('pointerdown', (e) => {
+      sound.enabled = !sound.enabled;
+      try { localStorage.setItem('bow-action-sound', sound.enabled ? 'on' : 'off'); } catch (err) { /* 何もしない */ }
+      refreshSoundButton();
+      e.preventDefault();
     });
 
     // 長押しメニューなどが出ないようにする
@@ -657,6 +894,7 @@
     function moveVertical(dy) {
       const p = player.position;
       const prevY = p.y;
+      const wasOnGround = player.onGround;
       p.y += dy;
       player.onGround = false;
 
@@ -667,6 +905,9 @@
           // 落下中：前フレームで箱の上面より上にいて、今フレームで上面を下回った → 着地
           if (prevY >= box.max.y - 0.001 && p.y <= box.max.y) {
             p.y = box.max.y;
+            // 空中からある程度の速さで着地したときだけ「トン」を鳴らす
+            // （歩いて小さな段差を降りたときなどは鳴らさない）
+            if (!wasOnGround && player.velocity.y < -LAND_SOUND_MIN_SPEED) playSound('land');
             player.velocity.y = 0;
             player.onGround = true;
           }
@@ -711,6 +952,7 @@
       if (player.jumpBufferTimer > 0 && player.coyoteTimer > 0) {
         player.velocity.y = JUMP_SPEED;
         player.onGround = false;
+        playSound('jump');
         player.coyoteTimer = 0;
         player.jumpBufferTimer = 0;
       }
