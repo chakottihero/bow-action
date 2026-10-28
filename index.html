@@ -93,6 +93,27 @@
     /* クールダウン中は薄く表示して、まだ撃てないことを伝える */
     #shoot.cooling { opacity: 0.45; }
 
+    /* ===== 照準（＋マーク）。縦位置は JS で CROSSHAIR_RAISE から決める ===== */
+    #crosshair {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 0;
+      height: 0;
+      pointer-events: none;
+      --crosshair-color: rgba(255, 255, 255, 0.9);
+    }
+    #crosshair::before, #crosshair::after {
+      content: '';
+      position: absolute;
+      background: var(--crosshair-color);
+      box-shadow: 0 0 2px rgba(0, 0, 0, 0.7);
+    }
+    #crosshair::before { left: -9px; top: -1px; width: 18px; height: 2px; } /* 横棒 */
+    #crosshair::after  { left: -1px; top: -9px; width: 2px; height: 18px; } /* 縦棒 */
+    /* 照準が的に重なっているときは赤くする */
+    #crosshair.on-target { --crosshair-color: #ff3030; }
+
     /* 効果音のON/OFFボタン（右上、バージョン表示の下） */
     #sound {
       position: fixed;
@@ -137,12 +158,13 @@
 </head>
 <body>
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.5</div>
+  <div id="version">v0.6</div>
   <div id="sound">🔊</div>
   <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
   <div id="shoot">SHOOT</div>
+  <div id="crosshair"></div>
 
   <!-- Three.js を CDN から ES Module として読み込む -->
   <script type="importmap">
@@ -165,7 +187,7 @@
     const JUMP_BUFFER = 0.12;       // 着地直前のジャンプ入力を受け付ける猶予 [秒]
     const CAMERA_DISTANCE = 7.5;    // カメラと注視点（主人公の胸あたり）の距離
     const CAMERA_PITCH_INIT = 0.3;  // カメラの上下角度の初期値 [ラジアン]（0で水平、大きいほど見下ろす）
-    const CAMERA_PITCH_MIN = 0.05;  // 上下角度の下限（これ以上下げると地面すれすれになる）
+    const CAMERA_PITCH_MIN = -0.25; // 上下角度の下限（マイナスでカメラが下がり、少し見上げられる。地面より下へは CAMERA_MIN_Y で止まる）
     const CAMERA_PITCH_MAX = 1.2;   // 上下角度の上限（約70度。真上から見下ろしすぎない）
     const CAMERA_MIN_Y = 0.3;       // カメラが地面にめり込まないための最低の高さ
     const CAMERA_FOLLOW = 2.5;      // カメラが主人公の背後へ回り込む速さ
@@ -176,7 +198,10 @@
     const MANUAL_CAMERA_HOLD = 2.0; // 手動で回したあと、自動回り込みを止めておく時間 [秒]
     const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
     const ARROW_LIFETIME = 2.0;     // 矢が何にも当たらなかったときに消えるまでの時間 [秒]
-    const ARROW_HEIGHT = 0.9;       // 矢を撃ち出す高さ（足元基準。地面に置いた1mの的に当たるよう胸よりやや低め）
+    const ARROW_HEIGHT = 1.3;       // 矢を撃ち出す高さ（足元基準。胸の高さ）
+    const CROSSHAIR_RAISE = 0.15;   // 照準を画面中央からどれだけ上に置くか（画面の高さに対する割合）
+    const AIM_FAR_DISTANCE = 100;   // 照準の先に何もないとき（空など）に狙う地点までの距離 [m]
+    const AIM_ASSIST_ANGLE = 10;    // エイムアシストが効く、照準からの角度 [度]（0でアシストなし）
     const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
     const TARGET_HP = 3;            // 的のHP
     const TARGET_FLASH_TIME = 0.1;  // 被弾時に白く光る時間 [秒]
@@ -654,7 +679,7 @@
     // =========================================================
     // 矢
     // 細い円柱＋先端の円錐。+Z 方向が先端になるよう形状を回転させておき、
-    // 発射時に Y 軸回転だけで向きを合わせる。
+    // 発射時に「+Z を飛ぶ方向へ向ける回転」をかけて向きを合わせる。
     // =========================================================
     const ARROW_LENGTH = 0.8;
     const arrowShaftGeometry = new THREE.CylinderGeometry(0.03, 0.03, ARROW_LENGTH, 6);
@@ -674,19 +699,113 @@
       shootCooldown = SHOOT_COOLDOWN;
       playSound('shoot');
 
-      // カメラが向いている水平方向へ撃ち、プレイヤーの体も即座にその方向へ向ける
-      const dir = new THREE.Vector3(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
-      player.facing = cameraYaw;
+      // 胸の高さから、照準の先（またはエイムアシストで選んだ的）へ向けて撃つ
+      const aim = computeAim();
+      const origin = player.position.clone();
+      origin.y += ARROW_HEIGHT;
+      const dir = (aim.target ? aim.target.mesh.position : aim.point).clone().sub(origin);
+      // 狙う地点が近すぎる（足元などを狙った）ときは、向きが不安定になるのでカメラの視線方向へ撃つ
+      if (dir.length() < 1.5) dir.copy(aim.rayDir);
+      dir.normalize();
+
+      // プレイヤーの体も即座に撃つ方向（水平成分）へ向ける
+      player.facing = Math.atan2(dir.x, dir.z);
 
       const mesh = new THREE.Group();
       mesh.add(new THREE.Mesh(arrowShaftGeometry, arrowShaftMaterial));
       mesh.add(new THREE.Mesh(arrowTipGeometry, arrowTipMaterial));
-      mesh.rotation.y = cameraYaw;
+      mesh.quaternion.setFromUnitVectors(ARROW_FORWARD, dir);
       // 体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
-      mesh.position.copy(player.position).addScaledVector(dir, PLAYER_RADIUS);
-      mesh.position.y += ARROW_HEIGHT;
+      mesh.position.copy(origin).addScaledVector(dir, PLAYER_RADIUS);
       scene.add(mesh);
       arrows.push({ mesh, dir, life: ARROW_LIFETIME });
+    }
+    const ARROW_FORWARD = new THREE.Vector3(0, 0, 1); // 矢のモデルの先端方向
+
+    // =========================================================
+    // 照準とエイムアシスト
+    // =========================================================
+    const crosshairEl = document.getElementById('crosshair');
+    crosshairEl.style.top = `${(0.5 - CROSSHAIR_RAISE) * 100}%`;
+    // 照準の位置をカメラの画面座標（-1〜1、上が+）で表したもの
+    const CROSSHAIR_NDC = new THREE.Vector2(0, CROSSHAIR_RAISE * 2);
+    const aimRaycaster = new THREE.Raycaster();
+    const AIM_ASSIST_COS = Math.cos(THREE.MathUtils.degToRad(AIM_ASSIST_ANGLE));
+
+    // レイ（origin から dir 方向）と箱の交差判定（スラブ法）。
+    // tMin〜tMax の範囲で当たれば、その距離を返す。当たらなければ null
+    function rayBox(origin, dir, box, tMin, tMax) {
+      for (const axis of ['x', 'y', 'z']) {
+        const o = origin[axis], d = dir[axis];
+        if (Math.abs(d) < 1e-9) {
+          // この軸に平行なレイ：箱の範囲外なら当たらない
+          if (o < box.min[axis] || o > box.max[axis]) return null;
+          continue;
+        }
+        let t1 = (box.min[axis] - o) / d;
+        let t2 = (box.max[axis] - o) / d;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tMin = Math.max(tMin, t1);
+        tMax = Math.min(tMax, t2);
+        if (tMin > tMax) return null;
+      }
+      return tMin;
+    }
+
+    // レイが最初に当たる箱（地形・的）を探す
+    function raycastColliders(origin, dir, tMin, tMax, ignore = null) {
+      let best = null;
+      for (const box of colliders) {
+        if (box === ignore) continue;
+        const t = rayBox(origin, dir, box, tMin, best ? best.t : tMax);
+        if (t !== null) best = { box, t };
+      }
+      return best;
+    }
+
+    // 今の照準で「どこを狙っているか」を計算する
+    // 戻り値：{ point: 照準の先の地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている的, target: アシストで狙う的 }
+    function computeAim() {
+      camera.updateMatrixWorld(); // 描画前でも最新のカメラ位置・向きで計算する
+      aimRaycaster.setFromCamera(CROSSHAIR_NDC, camera);
+      const camPos = aimRaycaster.ray.origin;
+      const rayDir = aimRaycaster.ray.direction;
+
+      // カメラとプレイヤーの間にある物は無視したいので、
+      // 「レイ上でプレイヤーの胸に一番近い点」から先だけを調べる
+      const chest = player.position.clone();
+      chest.y += ARROW_HEIGHT;
+      const tStart = Math.max(0, chest.sub(camPos).dot(rayDir));
+
+      const hit = raycastColliders(camPos, rayDir, tStart, AIM_FAR_DISTANCE);
+      const point = camPos.clone().addScaledVector(rayDir, hit ? hit.t : AIM_FAR_DISTANCE);
+      const onTarget = hit && hit.box.target ? hit.box.target : null;
+
+      // エイムアシスト：照準に重なっている的があればそれを優先。
+      // なければ、照準から AIM_ASSIST_ANGLE 度以内で一番近い角度の的を選ぶ
+      let target = onTarget;
+      if (!target && AIM_ASSIST_ANGLE > 0) {
+        let bestCos = AIM_ASSIST_COS;
+        const toTarget = new THREE.Vector3();
+        const origin = player.position.clone();
+        origin.y += ARROW_HEIGHT;
+        for (const t of targets) {
+          if (t.state !== 'alive') continue;
+          toTarget.copy(t.mesh.position).sub(camPos);
+          const along = toTarget.dot(rayDir);
+          if (along <= tStart) continue; // プレイヤーより手前（カメラ側）の的は対象外
+          const cos = along / toTarget.length();
+          if (cos < bestCos) continue;
+          // 遮蔽物チェック：矢の発射位置から的の中心まで、他の箱に遮られていないか
+          const path = t.mesh.position.clone().sub(origin);
+          const dist = path.length();
+          path.divideScalar(dist);
+          if (raycastColliders(origin, path, 0, dist, t.collider)) continue;
+          bestCos = cos;
+          target = t;
+        }
+      }
+      return { point, rayDir: rayDir.clone(), onTarget, target };
     }
 
     // 点が箱の中に入っているか
@@ -1042,6 +1161,8 @@
       playerMesh.rotation.y = player.facing;
 
       updateCamera(dt);
+      // 照準が的に重なっていれば照準を赤くする
+      crosshairEl.classList.toggle('on-target', !!computeAim().onTarget);
       renderer.render(scene, camera);
       requestAnimationFrame(loop);
     }
