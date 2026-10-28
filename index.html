@@ -19,7 +19,8 @@
       -webkit-tap-highlight-color: transparent;
       font-family: sans-serif;
     }
-    canvas { display: block; }
+    /* ドラッグで視点を回すため、キャンバス上でもスクロール・ズームを無効化 */
+    canvas { display: block; touch-action: none; }
 
     /* ===== バーチャルスティック（左下） ===== */
     #stick {
@@ -78,7 +79,7 @@
   </style>
 </head>
 <body>
-  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space</div>
+  <div id="help">移動: スティック / WASD ・ ジャンプ: ボタン / Space ・ 視点: 画面をドラッグ</div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="jump">JUMP</div>
 
@@ -101,9 +102,17 @@
     const STEP_HEIGHT = 0.35;       // ジャンプなしで自動的に乗り越えられる段差の高さ
     const COYOTE_TIME = 0.1;        // 足場から落ちた直後でもジャンプできる猶予 [秒]
     const JUMP_BUFFER = 0.12;       // 着地直前のジャンプ入力を受け付ける猶予 [秒]
-    const CAMERA_DISTANCE = 7.0;    // カメラと主人公の水平距離
-    const CAMERA_HEIGHT = 3.5;      // カメラの高さ（主人公の足元基準）
+    const CAMERA_DISTANCE = 7.5;    // カメラと注視点（主人公の胸あたり）の距離
+    const CAMERA_PITCH_INIT = 0.3;  // カメラの上下角度の初期値 [ラジアン]（0で水平、大きいほど見下ろす）
+    const CAMERA_PITCH_MIN = 0.05;  // 上下角度の下限（これ以上下げると地面すれすれになる）
+    const CAMERA_PITCH_MAX = 1.2;   // 上下角度の上限（約70度。真上から見下ろしすぎない）
+    const CAMERA_MIN_Y = 0.3;       // カメラが地面にめり込まないための最低の高さ
     const CAMERA_FOLLOW = 2.5;      // カメラが主人公の背後へ回り込む速さ
+    const CAMERA_SMOOTH = 8.0;      // カメラが主人公の移動に追従する滑らかさ（大きいほどキビキビ）
+    const CAMERA_YAW_SENSITIVITY = 0.006;   // 横ドラッグ1pxあたりの左右回転量 [ラジアン]
+    const CAMERA_PITCH_SENSITIVITY = 0.004; // 縦ドラッグ1pxあたりの上下回転量 [ラジアン]
+    const CAMERA_INVERT_Y = false;  // true にすると縦ドラッグの上下を反転
+    const MANUAL_CAMERA_HOLD = 2.0; // 手動で回したあと、自動回り込みを止めておく時間 [秒]
     const FALL_LIMIT = -20;         // この高さより落ちたらリスポーン
 
     // =========================================================
@@ -283,6 +292,52 @@
     // 長押しメニューなどが出ないようにする
     window.addEventListener('contextmenu', (e) => e.preventDefault());
 
+    // iOS Safari のピンチズーム・ダブルタップズームを止める（touch-action だけでは効かない場合の保険）
+    document.addEventListener('gesturestart', (e) => e.preventDefault());
+    document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+    document.addEventListener('dblclick', (e) => e.preventDefault());
+
+    // =========================================================
+    // 入力（視点ドラッグ）
+    // スティックとJUMPボタン以外（＝キャンバス）をドラッグするとカメラが回る。
+    // スティックとは別の指（pointerId）として扱うので、左手移動＋右手視点が同時にできる。
+    // PCではマウスの左ドラッグで同じように回せる。
+    // =========================================================
+    let cameraYaw = 0;                    // カメラの水平角度（0のとき +Z 方向を向く）
+    let cameraPitch = CAMERA_PITCH_INIT;  // カメラの上下角度
+    let manualCameraTimer = 0;            // 手動操作後、自動回り込みを止めている残り時間
+    const look = { pointerId: null, lastX: 0, lastY: 0 };
+    const canvasEl = renderer.domElement;
+
+    canvasEl.addEventListener('pointerdown', (e) => {
+      if (look.pointerId !== null) return;          // 視点操作はひとつの指だけで行う
+      if (e.pointerType === 'mouse' && e.button !== 0) return; // マウスは左ボタンのみ
+      look.pointerId = e.pointerId;
+      look.lastX = e.clientX;
+      look.lastY = e.clientY;
+      canvasEl.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    canvasEl.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== look.pointerId) return;
+      const dx = e.clientX - look.lastX;
+      const dy = e.clientY - look.lastY;
+      look.lastX = e.clientX;
+      look.lastY = e.clientY;
+      if (dx === 0 && dy === 0) return;
+      // 右へドラッグ → 視点が右を向く（yaw が減る方向が右回り）
+      cameraYaw -= dx * CAMERA_YAW_SENSITIVITY;
+      // 上へドラッグ → 見上げる（カメラが下がる）。反転設定にも対応
+      cameraPitch += dy * CAMERA_PITCH_SENSITIVITY * (CAMERA_INVERT_Y ? -1 : 1);
+      cameraPitch = THREE.MathUtils.clamp(cameraPitch, CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+      // 手動で回した直後は自動回り込みを止める
+      manualCameraTimer = MANUAL_CAMERA_HOLD;
+    });
+    const endLook = (e) => { if (e.pointerId === look.pointerId) look.pointerId = null; };
+    canvasEl.addEventListener('pointerup', endLook);
+    canvasEl.addEventListener('pointercancel', endLook);
+    canvasEl.addEventListener('lostpointercapture', endLook);
+
     // 入力をまとめて「-1〜1 の2次元ベクトル」として取得する
     function getMoveInput() {
       let x = 0, y = 0;
@@ -398,10 +453,9 @@
     // =========================================================
     // ゲームの更新処理
     // =========================================================
-    let cameraYaw = 0; // カメラの水平角度（0のとき +Z 方向を向く）
-
     function update(dt) {
       // ---- 入力をカメラ基準の移動方向に変換 ----
+      // スティックの「上」は常にカメラが向いている方向になる
       const input = getMoveInput();
       // カメラの前方向と右方向（XZ平面上）
       const fx = Math.sin(cameraYaw), fz = Math.cos(cameraYaw);
@@ -446,7 +500,9 @@
 
       // ---- カメラの向きを主人公の背後へ徐々に回り込ませる ----
       // カメラ側（手前）へ歩いているときに回り込むとグルグル回ってしまうので除外
-      if (moveLen > 0.05) {
+      // 手動で視点を回した直後（manualCameraTimer が残っている間）も回り込まない
+      manualCameraTimer = Math.max(0, manualCameraTimer - dt);
+      if (moveLen > 0.05 && manualCameraTimer <= 0) {
         const towardCamera = (moveX * fx + moveZ * fz) / moveLen < -0.5;
         if (!towardCamera) {
           cameraYaw = lerpAngle(cameraYaw, player.facing, 1 - Math.exp(-CAMERA_FOLLOW * moveLen * dt));
@@ -462,25 +518,30 @@
     }
 
     // =========================================================
-    // 三人称カメラ：主人公の後ろ上方から滑らかについていく
+    // 三人称カメラ：注視点のまわりを yaw / pitch で回る
+    // 注視点（主人公の胸あたり）だけを滑らかに追従させ、角度は即座に反映する。
+    // こうすると、主人公の動きはふんわり追いかけつつ、手動回転はキビキビ反応する。
     // =========================================================
-    const cameraTarget = new THREE.Vector3();
-    const cameraGoal = new THREE.Vector3();
+    const cameraFocus = new THREE.Vector3(); // 実際に注視している点（滑らかに追従）
+    const focusGoal = new THREE.Vector3();   // 注視点の目標（主人公の胸あたり）
 
     function updateCamera(dt, snap = false) {
       const p = player.position;
-      // 主人公の後方（カメラの前方向の逆）に置く
-      cameraGoal.set(
-        p.x - Math.sin(cameraYaw) * CAMERA_DISTANCE,
-        p.y + CAMERA_HEIGHT,
-        p.z - Math.cos(cameraYaw) * CAMERA_DISTANCE
-      );
-      if (snap) camera.position.copy(cameraGoal);
-      else camera.position.lerp(cameraGoal, 1 - Math.exp(-8 * dt));
+      focusGoal.set(p.x, p.y + PLAYER_HEIGHT * 0.6, p.z);
+      if (snap) cameraFocus.copy(focusGoal);
+      else cameraFocus.lerp(focusGoal, 1 - Math.exp(-CAMERA_SMOOTH * dt));
 
-      // 主人公の胸あたりを注視する
-      cameraTarget.set(p.x, p.y + PLAYER_HEIGHT * 0.6, p.z);
-      camera.lookAt(cameraTarget);
+      // 注視点から「カメラの前方向の逆」へ、上下角度ぶん持ち上げた位置に置く
+      const horizontal = Math.cos(cameraPitch) * CAMERA_DISTANCE;
+      camera.position.set(
+        cameraFocus.x - Math.sin(cameraYaw) * horizontal,
+        cameraFocus.y + Math.sin(cameraPitch) * CAMERA_DISTANCE,
+        cameraFocus.z - Math.cos(cameraYaw) * horizontal
+      );
+      // 地面にめり込まないよう最低の高さを保つ
+      if (camera.position.y < CAMERA_MIN_Y) camera.position.y = CAMERA_MIN_Y;
+
+      camera.lookAt(cameraFocus);
     }
 
     // =========================================================
