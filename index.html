@@ -73,7 +73,8 @@
     /* クールダウン中は薄く表示して、まだ撃てないことを伝える */
     #shoot.cooling { opacity: 0.45; }
 
-    /* ===== 照準（＋マーク）。縦位置は JS で CROSSHAIR_RAISE から決める ===== */
+    /* ===== 照準（＋マーク） ===== */
+    /* 位置は JS で「矢が最初に当たる地点」の画面上の位置に合わせる */
     #crosshair {
       position: fixed;
       left: 50%;
@@ -183,6 +184,22 @@
     #hud-top .label { font-size: 0.75em; opacity: 0.8; margin-right: 4px; }
     /* 残り時間が少なくなったら赤くする */
     #hud-time.warning { color: #ff4a3a; }
+    /* 今の立ち位置と狙いの角度（同じ値で撃てば必ず同じ軌道になる） */
+    #hud-aim {
+      position: fixed;
+      left: 50%;
+      top: calc(46px + env(safe-area-inset-top));
+      transform: translateX(-50%);
+      padding: 3px 12px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: clamp(12px, 3.4vw, 14px);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    body[data-state="title"] #hud-aim, body[data-state="result"] #hud-aim { display: none; }
 
     /* ===== タイトル画面・リザルト画面（射的場の上に重ねる） ===== */
     .screen {
@@ -264,7 +281,7 @@
 </head>
 <body data-state="title">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v1.0</div>
+  <div id="version">v1.1</div>
   <div id="sound">🔊</div>
   <!-- ゲーム中の上部表示 -->
   <div id="hud-top">
@@ -272,14 +289,15 @@
     <span><span class="label">残り</span><span id="hud-time">60</span></span>
     <span><span class="label">スコア</span><span id="hud-score">0</span></span>
   </div>
+  <div id="hud-aim"></div>
   <div id="countdown"></div>
   <!-- タイトル画面 -->
   <div id="title-screen" class="screen">
     <h1>鏡射的</h1>
     <button id="start-btn" class="btn">スタート</button>
     <div class="best">ベストスコア：<span id="title-best">0</span>点</div>
-    <div class="help">移動: スティック左右 / A・D ・ 狙い: 画面をドラッグ ・ 射撃: SHOOT / 右クリック / F<br>
-      鏡で矢を反射させて、衝立の裏の風船も割ろう。1本でまとめて割るとボーナス！</div>
+    <div class="help">移動: スティック左右 / A・D（0.5m刻み） ・ 狙い: 画面をドラッグ（1度刻み） ・ 射撃: SHOOT / 右クリック / F<br>
+      矢は6本。鏡で反射させて、1本でまとめて割るとボーナス！ 全部割れる撃ち方が必ずある。</div>
   </div>
   <!-- リザルト画面 -->
   <div id="result-screen" class="screen">
@@ -314,10 +332,12 @@
     // =========================================================
     const PLAYER_RADIUS = 0.5;      // 主人公（カプセル）の半径
     const PLAYER_HEIGHT = 2.0;      // 主人公の全高（足元〜頭）
-    const MOVE_SPEED = 4.0;         // 射的台の後ろを左右に動く速さ [m/s]
+    const MOVE_STEP = 0.5;          // 立ち位置の刻み [m]（射的台の上をこの間隔でカチッと止まる）
+    const MOVE_REPEAT_DELAY = 0.3;  // 移動キー・スティックを押し続けたとき、連続で動き始めるまでの時間 [秒]
+    const MOVE_REPEAT_INTERVAL = 0.12; // 押し続けているときに1刻み動く間隔 [秒]
 
     // ---- ゲームのルール ----
-    const ARROW_COUNT = 10;         // 1ゲームで撃てる矢の本数
+    const ARROW_COUNT = 6;          // 1ゲームで撃てる矢の本数（満点ルートは5本。1本は予備）
     const TIME_LIMIT = 60;          // 制限時間 [秒]
     const SCORE_NORMAL = 1;         // 止まっている風船の点数
     const SCORE_GOLD = 3;           // 金色の（動く）風船の点数
@@ -335,42 +355,51 @@
     const AREA_HALF_WIDTH = 7.0;    // 風船エリアの幅の半分 [m]（左右の壁の内側の面の位置）
     const AREA_DEPTH = 15.0;        // 風船エリアの奥行き [m]（射的台の奥から奥の壁まで）
     const AREA_BACK_Z = COUNTER_DEPTH + AREA_DEPTH; // 奥の壁の内側の面の位置
-    // 衝立（ついたて）：風船エリアの真ん中に立つ木の板。この裏の風船は鏡で反射させないと狙えない
-    const PARTITION = { x: 0, z: 9.0, width: 8.0, height: 2.4, thickness: 0.2 };
-
     // ---- 鏡の配置 ----
-    // x, z は鏡の中心、y は下端の高さ、yaw は鏡の面が向いている方向 [度]
-    //   （0 で +Z 向き、90 で +X 向き、180 で手前向き。鏡は両面とも反射する）
+    // x, y, z は鏡の中心 [m]、yaw は鏡の面が向いている水平方向 [度]（0 で +Z 向き、90 で +X 向き、180 で手前向き）、
+    //   tilt は面の上下の傾き [度]（0 で垂直に立つ、90 で真上を向いた水平な板）。鏡は両面とも反射し、動かない
     const MIRROR_WIDTH = 2.0;       // 鏡の幅 [m]
     const MIRROR_HEIGHT = 2.0;      // 鏡の高さ [m]
     const MIRROR_THICKNESS = 0.1;   // 鏡の厚さ [m]
     const MIRROR_FRAME_WIDTH = 0.1; // 鏡の木の枠の太さ [m]（枠に当たった矢は反射せずに消える）
     const MIRRORS = [
-      { x: -6.9, y: 0.3, z: 8.0, yaw: 90 },   // 左の壁ぎわ：右側から撃つと、衝立の左を回り込んで裏へ
-      { x: 6.9, y: 0.3, z: 8.0, yaw: -90 },   // 右の壁ぎわ：左側から撃つと、衝立の右を回り込んで裏へ
-      { x: -5.5, y: 0.3, z: 15.0, yaw: 151 }, // 奥・左：斜めに向けて、衝立の裏の真ん中へ跳ね返す
-      { x: 5.5, y: 0.3, z: 15.0, yaw: -151 }, // 奥・右：同じく右から
+      { x: -6.9, y: 1.6, z: 9.2, yaw: 90 }, // 鏡0：右の壁ぎわ・中ほど
+      { x: -2.3, y: 1.6, z: 15.6, yaw: 180 }, // 鏡1：奥の壁・右寄り
+      { x: 6.9, y: 1.6, z: 2.6, yaw: -90 }, // 鏡2：左の壁ぎわ・手前
+      { x: 6.9, y: 1.6, z: 10.5, yaw: -90 }, // 鏡3：左の壁ぎわ・奥
+      { x: 1.5, y: 3.6, z: 7.0, yaw: 0, tilt: 90 }, // 鏡4：空中・水平な板（上下に曲げる）
+      { x: 3.5, y: 1.6, z: 15.6, yaw: 180 }, // 鏡5：奥の壁・左寄り
     ];
 
-    // ---- 風船の配置（全部で20個） ----
-    // 止まっている風船（14個）：[x, y, z]。y は風船の中心の高さ [m]。その場でふわふわ揺れる
+    // ---- 風船の配置（全部で20個。満点ルートの軌道の上に並べてある） ----
+    // 止まっている風船（16個）：[x, y, z]。y は風船の中心の高さ [m]。その場でふわふわ揺れる
     const STATIC_BALLOONS = [
-      [-5.0, 0.6, 3.5], [-2.0, 1.8, 4.0], [1.0, 0.8, 3.0], [4.5, 2.6, 4.5],
-      [-5.0, 3.2, 6.0], [2.5, 1.4, 6.5], [5.2, 0.9, 5.5],
-      [-5.5, 2.2, 12.0], [5.0, 3.4, 13.5], [-3.0, 3.0, 15.0],
-      // ↓ 衝立の裏に隠れていて、鏡で反射させないと狙えない風船
-      [-1.0, 1.3, 12.5], [1.0, 1.1, 12.5], [0.0, 1.5, 10.5], [3.5, 0.5, 15.0],
+      [-3.77, 1.3, 4.79], [-4.56, 1.3, 12.46], [3.2, 1.3, 7.56], // ルート1の上
+      [-0.06, 2.55, 3.84], [1.92, 2.84, 9.91], [4.49, 0.6, 13.25], // ルート2の上
+      [3.48, 1.53, 4.98], [5.39, 1.85, 12.69], [-2.22, 2.35, 6.23], // ルート3の上
+      [5.64, 2.55, 3.96], [4.42, 2.89, 5.18], [-3.19, 2.12, 12.79], // ルート4の上
+      [-4.83, 1.58, 3.25], [-5.39, 1.71, 4.9], [-5.88, 2.23, 11.96], [-5.31, 2.35, 13.61], // ルート5の上
     ];
-    // 動く風船（6個、金色）：center は往復の中心、axis は動く向き、range は中心からの振れ幅 [m]、
+    // 動く風船（4個、金色）：center は往復の中心、axis は動く向き、range は中心からの振れ幅 [m]、
     //   period は1往復の時間 [秒]、phase は動き出しのずれ [秒]。
     //   位置はゲーム開始からの経過時間だけで決まるので、毎回まったく同じ動きになる
     const MOVING_BALLOONS = [
-      { center: [0.0, 2.0, 5.5], axis: [1, 0, 0], range: 3.0, period: 4.0, phase: 0 },    // 横に往復
-      { center: [0.0, 3.3, 13.0], axis: [1, 0, 0], range: 3.5, period: 5.0, phase: 1.0 },  // 横に往復（衝立の上）
-      { center: [-5.5, 2.0, 10.5], axis: [0, 1, 0], range: 1.2, period: 3.5, phase: 0 },  // 縦に往復
-      { center: [4.0, 2.0, 2.8], axis: [0, 1, 0], range: 1.3, period: 3.0, phase: 0.5 },  // 縦に往復
-      { center: [-2.5, 2.0, 7.0], axis: [1, 1, 0], range: 1.5, period: 4.5, phase: 0 },   // 斜めに往復
-      { center: [4.0, 2.2, 11.5], axis: [-1, 1, 0], range: 1.5, period: 5.5, phase: 2.0 }, // 斜めに往復
+      { center: [1.29, 1.3, 8.36], axis: [0.82, 0.0, 0.57], range: 1.3, period: 6, phase: 4.08 }, // 横に往復（ルート1と交差）
+      { center: [2.44, 1.62, 11.52], axis: [0.0, 1.0, 0.0], range: 0.9, period: 6, phase: 0.57 }, // 縦に往復（ルート2と交差）
+      { center: [-1.85, 1.63, 8.06], axis: [0.6, 0.71, -0.37], range: 1.1, period: 6, phase: 2.06 }, // 斜めに往復（ルート3と交差）
+      { center: [-1.19, 2.45, 12.36], axis: [-0.71, 0.0, -0.71], range: 1.3, period: 6, phase: 4.42 }, // 横に往復（ルート4と交差）
+    ];
+
+    // ---- 満点ルート（確認用。ゲーム画面には出さない） ----
+    // position: 立ち位置 [m]（射的台の中央が 0、右が +）、yaw: 横の角度 [度]（右が +）、
+    // pitch: 縦の角度 [度]（上が +）、time: 撃つタイミング（ゲーム開始＝「スタート！」からの秒数）
+    // 画面上部の「位置 / 横 / 縦」の表示と同じ単位。5本で20個すべて割れる（詳しくは solution.md）
+    const SOLUTION = [
+      { position: 0.0, yaw: 35, pitch: 0, time: 8 }, // ルート1：反射3回（鏡0→1→2）
+      { position: 1.5, yaw: -18, pitch: 15, time: 18 }, // ルート2：反射2回（鏡4→5）
+      { position: 0.0, yaw: -32, pitch: 2, time: 28 }, // ルート3：反射2回（鏡3→5）
+      { position: -3.5, yaw: -45, pitch: 11, time: 38 }, // ルート4：反射2回（鏡2→4）
+      { position: 3.5, yaw: 19, pitch: 4, time: 48 }, // ルート5：反射1回（鏡0）
     ];
 
     // ---- 見た目：風船 ----
@@ -396,7 +425,7 @@
     const FLOOR_HALF = 30;          // 床の広さの半分 [m]（射的場の外まで敷いておく）
     const WALL_COLOR = 0x4a2e1c;    // 射的場の壁
     const WALL_HEIGHT = 4.0;        // 射的場の壁の高さ [m]
-    const WOOD_COLOR = 0xb07a42;    // 射的台・衝立の木
+    const WOOD_COLOR = 0xb07a42;    // 射的台の木
     const MIRROR_FRAME_COLOR = 0x7a4a24; // 鏡の木の枠
     const CURTAIN_RED = 0xd8202a;   // 紅白幕の赤
     const CURTAIN_WHITE = 0xf4f0ea; // 紅白幕の白
@@ -413,8 +442,8 @@
     const CAMERA_SMOOTH = 10.0;     // カメラがプレイヤーの左右移動に追従する滑らかさ（大きいほどキビキビ）
     const AIM_YAW_LIMIT = 60;       // 狙いを左右に動かせる範囲 [度]（正面から ±）
     const AIM_PITCH_LIMIT = 30;     // 狙いを上下に動かせる範囲 [度]（水平から ±）
-    const CAMERA_YAW_SENSITIVITY = 0.004;   // 横ドラッグ1pxあたりの左右の回転量 [ラジアン]
-    const CAMERA_PITCH_SENSITIVITY = 0.004; // 縦ドラッグ1pxあたりの上下の回転量 [ラジアン]
+    const CAMERA_YAW_SENSITIVITY = 0.25;    // 横ドラッグ1pxあたりの左右の回転量 [度]（角度は1度刻みに丸める）
+    const CAMERA_PITCH_SENSITIVITY = 0.25;  // 縦ドラッグ1pxあたりの上下の回転量 [度]
     const CAMERA_INVERT_Y = false;  // true にすると縦ドラッグの上下を反転
     const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
     const ARROW_LIFETIME = 5.0;     // 矢が消えるまでの時間 [秒]（重力なしでまっすぐ飛び続ける）
@@ -425,8 +454,6 @@
     const TRAIL_OPACITY = 0.7;      // 飛んでいる矢の光の尾の濃さ（0〜1）
     const TRAIL_FADE_TIME = 1.0;    // 矢が消えてから光の尾が消えるまでの時間 [秒]
     const ARROW_HEIGHT = 1.3;       // 矢を撃ち出す高さ（足元基準。胸の高さ）
-    const CROSSHAIR_RAISE = 0;      // 照準を画面中央からどれだけ上に置くか（画面の高さに対する割合）
-    const AIM_FAR_DISTANCE = 100;   // 照準の先に何もないとき（空など）に狙う地点までの距離 [m]
     const SHOOT_COOLDOWN = 0.4;     // 射撃のクールダウン [秒]（連打防止）
     const SE_MASTER_VOLUME = 0.7;   // 効果音全体の音量（0〜1）
     const SE_VOLUMES = {            // 効果音ごとの音量（0〜1、全体音量に掛け合わされる）
@@ -726,7 +753,7 @@
     floorTexture.repeat.set(FLOOR_HALF * 2 / 4, FLOOR_HALF * 2 / 4);
     addBox(0, -1, 0, FLOOR_HALF * 2, 1, FLOOR_HALF * 2, new THREE.MeshStandardMaterial({ map: floorTexture, roughness: 0.85 }));
 
-    // ---- 木の板の絵（射的台・衝立に使う）：横板の継ぎ目と外枠 ----
+    // ---- 木の板の絵（射的台に使う）：横板の継ぎ目と外枠 ----
     const woodTexture = makeCanvasTexture(128, 128, (g, w, h) => {
       g.fillStyle = shade(WOOD_COLOR, 0);
       g.fillRect(0, 0, w, h);
@@ -740,10 +767,6 @@
 
     // ---- 射的台（横長のカウンター）。プレイヤーはこの後ろに立つ ----
     addBox(0, 0, COUNTER_DEPTH / 2, COUNTER_WIDTH, COUNTER_HEIGHT, COUNTER_DEPTH, woodMaterial);
-
-    // ---- 衝立：この裏に隠れた風船は、鏡で反射させないと狙えない ----
-    addBox(PARTITION.x, 0, PARTITION.z + PARTITION.thickness / 2,
-      PARTITION.width, PARTITION.height, PARTITION.thickness, woodMaterial);
 
     // ---- 風船エリアの壁（左・右・奥。高さ WALL_HEIGHT）。当たり判定あり、当たった矢は消える ----
     const WALL_THICKNESS = 0.5;
@@ -842,9 +865,9 @@
 
     // =========================================================
     // 鏡（水色の薄い板＋木の枠）
-    // 鏡は斜めに置けるので、軸に平行な箱（AABB）の colliders には入れず、
-    // 「鏡の中心・面の向き（normal）・横方向（right）」を持つ回転した箱として別に扱う。
-    // 当たり判定は鏡のローカル座標（right, 上, normal）に変換して行う。
+    // 鏡は斜めや空中にも置けるので、軸に平行な箱（AABB）の colliders には入れず、
+    // 「鏡の中心・面の向き（normal）・横方向（right）・縦方向（up）」を持つ回転した箱として別に扱う。
+    // 当たり判定は鏡のローカル座標（right, up, normal）に変換して行う。
     // =========================================================
     const MIRROR_HALF = new THREE.Vector3(MIRROR_WIDTH / 2, MIRROR_HEIGHT / 2, MIRROR_THICKNESS / 2);
     const mirrorMaterial = new THREE.MeshStandardMaterial({
@@ -865,8 +888,13 @@
       [F, MIRROR_HEIGHT - F * 2, MIRROR_WIDTH / 2 - F / 2, 0],
       [F, MIRROR_HEIGHT - F * 2, -MIRROR_WIDTH / 2 + F / 2, 0],
     ];
-    const mirrors = MIRRORS.map(({ x, y, z, yaw }) => {
+    const mirrors = MIRRORS.map(({ x, y, z, yaw, tilt = 0 }) => {
       const rad = THREE.MathUtils.degToRad(yaw);
+      const tiltRad = THREE.MathUtils.degToRad(tilt);
+      // 面の向き（ローカル +Z）・横方向（ローカル +X、いつも水平）・縦方向（ローカル +Y）
+      const normal = new THREE.Vector3(Math.sin(rad) * Math.cos(tiltRad), Math.sin(tiltRad), Math.cos(rad) * Math.cos(tiltRad));
+      const right = new THREE.Vector3(Math.cos(rad), 0, -Math.sin(rad));
+      const up = new THREE.Vector3().crossVectors(normal, right);
       const mesh = new THREE.Group();
       mesh.add(new THREE.Mesh(mirrorGlassGeometry, mirrorMaterial));
       for (const [w, h, px, py] of MIRROR_FRAME_PARTS) {
@@ -875,13 +903,14 @@
         mesh.add(part);
       }
       mesh.traverse((o) => { o.castShadow = true; o.receiveShadow = true; });
-      mesh.position.set(x, y + MIRROR_HEIGHT / 2, z);
-      mesh.rotation.y = rad;
+      mesh.position.set(x, y, z);
+      mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, normal));
       scene.add(mesh);
       return {
         center: mesh.position.clone(),
-        normal: new THREE.Vector3(Math.sin(rad), 0, Math.cos(rad)), // 鏡の面の向き（ローカル +Z）
-        right: new THREE.Vector3(Math.cos(rad), 0, -Math.sin(rad)), // 鏡の横方向（ローカル +X）
+        normal,
+        right,
+        up,
         localBox: { min: MIRROR_HALF.clone().negate(), max: MIRROR_HALF.clone() },
       };
     });
@@ -893,16 +922,12 @@
              Math.abs(local.y) <= MIRROR_HALF.y - MIRROR_FRAME_WIDTH;
     }
 
-    // ワールド座標の点・方向を、鏡のローカル座標（x: 横, y: 上, z: 面の向き）に変換する
+    // ワールド座標の点・方向を、鏡のローカル座標（x: 横, y: 縦, z: 面の向き）に変換する
+    const toLocalTemp = new THREE.Vector3();
     function toMirrorLocal(mirror, v, out, isDirection = false) {
-      const dx = v.x - (isDirection ? 0 : mirror.center.x);
-      const dy = v.y - (isDirection ? 0 : mirror.center.y);
-      const dz = v.z - (isDirection ? 0 : mirror.center.z);
-      return out.set(
-        dx * mirror.right.x + dz * mirror.right.z,
-        dy,
-        dx * mirror.normal.x + dz * mirror.normal.z
-      );
+      const d = toLocalTemp.copy(v);
+      if (!isDirection) d.sub(mirror.center);
+      return out.set(d.dot(mirror.right), d.dot(mirror.up), d.dot(mirror.normal));
     }
 
     // =========================================================
@@ -984,20 +1009,13 @@
       return out;
     }
 
-    // 点が風船（縦長の球）の中に入っているか
-    function pointInBalloon(p, balloon) {
-      const dx = (p.x - balloon.center.x) / BALLOON_RADIUS;
-      const dy = (p.y - balloon.center.y) / BALLOON_HALF_HEIGHT;
-      const dz = (p.z - balloon.center.z) / BALLOON_RADIUS;
-      return dx * dx + dy * dy + dz * dz <= 1;
-    }
-
     // レイと風船（縦長の球）の交差判定。縦方向を縮めて普通の球にしてから解く
+    // center は風船の中心（動く風船は時刻によって変わるので外から渡す）
     // tMin〜tMax の範囲で当たれば、その距離を返す。当たらなければ null
-    function rayBalloon(origin, dir, balloon, tMin, tMax) {
-      const ox = origin.x - balloon.center.x;
-      const oy = (origin.y - balloon.center.y) / BALLOON_STRETCH;
-      const oz = origin.z - balloon.center.z;
+    function rayBalloon(origin, dir, center, tMin, tMax) {
+      const ox = origin.x - center.x;
+      const oy = (origin.y - center.y) / BALLOON_STRETCH;
+      const oz = origin.z - center.z;
       const dy = dir.y / BALLOON_STRETCH;
       const a = dir.x * dir.x + dy * dy + dir.z * dir.z;
       const b = 2 * (ox * dir.x + oy * dy + oz * dir.z);
@@ -1065,14 +1083,17 @@
       }
     }
 
-    // 風船の動き・全部割れたときの復活・破片を更新する
-    // timeStep は風船の動きの時間を進める量（カウントダウン中は 0 にして止めておく）
-    function updateBalloons(dt, timeStep = dt) {
+    // 経過時間を進め、全部の風船の中心をその時刻の位置にする（矢の当たり判定の前に毎回呼ぶ）
+    function advanceBalloonTime(timeStep) {
       gameTime += timeStep;
+      for (const balloon of balloons) balloonPositionAt(balloon, gameTime, balloon.center);
+    }
+
+    // 風船の見た目・全部割れたときの復活・破片を更新する（描画フレームごとに呼ぶ）
+    function updateBalloons(dt) {
       // 金色の風船はゆっくり明滅させて、動く風船だとひと目で分かるようにする
       goldGlow = 0.25 + 0.25 * Math.sin(gameTime * BALLOON_GOLD_GLOW_SPEED);
       for (const balloon of balloons) {
-        balloonPositionAt(balloon, gameTime, balloon.center);
         balloon.group.position.copy(balloon.center);
         if (balloon.motion) balloon.material.emissiveIntensity = goldGlow;
       }
@@ -1100,8 +1121,11 @@
     const PLAYER_Z = -(PLAYER_RADIUS + 0.1);                // 射的台の手前に立つ位置（前後には動かない）
     const PLAYER_X_LIMIT = COUNTER_WIDTH / 2 - PLAYER_RADIUS; // 射的台の幅からはみ出さない範囲
     const player = {
-      position: new THREE.Vector3(0, 0, PLAYER_Z),
+      slotX: 0,           // 今の立ち位置（MOVE_STEP 刻みの X 座標）。矢はいつもここから撃つ
+      position: new THREE.Vector3(0, 0, PLAYER_Z), // 見た目の位置（slotX へ滑らかに近づく）
       facing: 0,          // 向いている方向（Y軸回転、ラジアン）。狙っている方向に合わせる
+      moveDir: 0,         // 押されている移動の向き（右が+、-1/0/1）
+      moveRepeat: 0,      // 押し続けたときに次の刻みへ動くまでの残り時間
     };
 
     // 見た目用のグループ（足元基準で配置するため、カプセル本体は上にずらす）
@@ -1185,24 +1209,28 @@
     const arrowShaftMaterial = new THREE.MeshStandardMaterial({ color: 0x8a6a40 });
     const arrowTipMaterial = new THREE.MeshStandardMaterial({ color: 0xdddddd });
 
-    const arrows = [];      // 飛んでいる矢 { mesh, dir, life, reflections, hitTargets }
+    const arrows = [];      // 飛んでいる矢 { mesh, tip, dir, life, reflections, hitTargets, ... }
     let shootCooldown = 0;  // 次に撃てるまでの残り時間
+    const ARROW_FORWARD = new THREE.Vector3(0, 0, 1); // 矢のモデルの先端方向
+    // 矢の中心から先端までの距離
+    const ARROW_TIP_OFFSET = ARROW_LENGTH / 2 + 0.18;
 
-    // 今撃ったら矢がどう飛び出すかを計算する（予測線と実際の射撃で共通）
-    // 戻り値：{ aim: 照準の情報, dir: 飛ぶ向き, position: 矢の中心の初期位置, tip: 矢の先端の初期位置 }
-    function computeShot() {
-      // 胸の高さから、照準の先に見えている地点へ向けて撃つ（自動の狙い補正はしない）
-      const aim = computeAim();
-      const origin = player.position.clone();
-      origin.y += ARROW_HEIGHT;
-      const dir = aim.point.clone().sub(origin);
-      // 狙う地点が近すぎる（足元などを狙った）ときは、向きが不安定になるのでカメラの視線方向へ撃つ
-      if (dir.length() < 1.5) dir.copy(aim.rayDir);
-      dir.normalize();
-      // 体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
-      const position = origin.addScaledVector(dir, PLAYER_RADIUS);
+    // 立ち位置と角度から、矢がどう飛び出すかを計算する（予測線・実際の射撃・シミュレーションで共通）
+    // slotX: 立ち位置の X 座標、yawDeg: 横の角度 [度]（+ で左 = +X 方向）、pitchDeg: 縦の角度 [度]（+ で上）
+    // カメラの位置などには一切よらないので、同じ値なら毎回まったく同じ向き・位置から飛ぶ
+    function shotFrom(slotX, yawDeg, pitchDeg) {
+      const yaw = THREE.MathUtils.degToRad(yawDeg);
+      const pitch = THREE.MathUtils.degToRad(pitchDeg);
+      const dir = new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+      // 胸の高さの、体の表面あたりから撃ち出す（中心から出すと見た目がめり込むため）
+      const position = new THREE.Vector3(slotX, ARROW_HEIGHT, PLAYER_Z).addScaledVector(dir, PLAYER_RADIUS);
       const tip = position.clone().addScaledVector(dir, ARROW_TIP_OFFSET);
-      return { aim, dir, position, tip };
+      return { dir, position, tip };
+    }
+
+    // 今の立ち位置と狙いで撃ったときの矢
+    function currentShot() {
+      return shotFrom(player.slotX, aimYawDeg, aimPitchDeg);
     }
 
     // 矢を1本撃つ（ゲーム中でない・矢が残っていない・クールダウン中なら何もしない）
@@ -1213,8 +1241,7 @@
       refreshHud();
       playSound('shoot');
 
-      const { dir, position, tip } = computeShot();
-
+      const { dir, position, tip } = currentShot();
       const mesh = new THREE.Group();
       mesh.add(new THREE.Mesh(arrowShaftGeometry, arrowShaftMaterial));
       mesh.add(new THREE.Mesh(arrowTipGeometry, arrowTipMaterial));
@@ -1223,6 +1250,7 @@
       scene.add(mesh);
       arrows.push({
         mesh,
+        tip,                   // 矢の先端の位置（当たり判定はここで行う）
         dir,
         life: ARROW_LIFETIME,
         reflections: 0,        // 鏡で反射した回数
@@ -1232,16 +1260,12 @@
         sinceCorner: 0,        // 発射・最後の反射から進んだ距離（尾の描き方に使う）
       });
     }
-    const ARROW_FORWARD = new THREE.Vector3(0, 0, 1); // 矢のモデルの先端方向
 
     // =========================================================
     // 照準
+    // 照準は「矢が最初に当たる地点（鏡・壁など）」の画面上の位置に表示する。
     // =========================================================
     const crosshairEl = document.getElementById('crosshair');
-    crosshairEl.style.top = `${(0.5 - CROSSHAIR_RAISE) * 100}%`;
-    // 照準の位置をカメラの画面座標（-1〜1、上が+）で表したもの
-    const CROSSHAIR_NDC = new THREE.Vector2(0, CROSSHAIR_RAISE * 2);
-    const aimRaycaster = new THREE.Raycaster();
 
     // レイ（origin から dir 方向）と箱の交差判定（スラブ法）。
     // tMin〜tMax の範囲で当たれば、その距離を返す。当たらなければ null
@@ -1287,33 +1311,6 @@
       return best;
     }
 
-    // 今の照準で「どこを狙っているか」を計算する
-    // 戻り値：{ point: 照準の先に見えている地点, rayDir: カメラの視線方向, onTarget: 照準に重なっている風船 }
-    function computeAim() {
-      camera.updateMatrixWorld(); // 描画前でも最新のカメラ位置・向きで計算する
-      aimRaycaster.setFromCamera(CROSSHAIR_NDC, camera);
-      const camPos = aimRaycaster.ray.origin;
-      const rayDir = aimRaycaster.ray.direction;
-
-      // カメラとプレイヤーの間にある物は無視したいので、
-      // 「レイ上でプレイヤーの胸に一番近い点」から先だけを調べる
-      const chest = player.position.clone();
-      chest.y += ARROW_HEIGHT;
-      const tStart = Math.max(0, chest.sub(camPos).dot(rayDir));
-
-      const hit = raycastColliders(camPos, rayDir, tStart, AIM_FAR_DISTANCE);
-      let hitT = hit ? hit.t : AIM_FAR_DISTANCE;
-      // 地形や鏡より手前に風船が見えていれば、照準はその風船に重なっている
-      let onTarget = null;
-      for (const balloon of balloons) {
-        if (balloon.state !== 'alive') continue;
-        const t = rayBalloon(camPos, rayDir, balloon, tStart, hitT);
-        if (t !== null) { hitT = t; onTarget = balloon; }
-      }
-      const point = camPos.clone().addScaledVector(rayDir, hitT);
-      return { point, rayDir: rayDir.clone(), onTarget };
-    }
-
     // 点が箱の中に入っているか
     function pointInBox(p, box) {
       return p.x >= box.min.x && p.x <= box.max.x &&
@@ -1321,29 +1318,70 @@
              p.z >= box.min.z && p.z <= box.max.z;
     }
 
-    // 矢の中心から先端までの距離
-    const ARROW_TIP_OFFSET = ARROW_LENGTH / 2 + 0.18;
-
-    // 矢の先端が、このフレームで鏡に当たったかを調べる。
-    // prevTip → tip の線分と鏡の交差を求め、一番手前で当たった鏡を返す
+    // from → to の線分が最初に当たる鏡を探す（from が鏡の面ちょうどの場合、その鏡からは離れていくので無視する）
     const segmentDir = new THREE.Vector3();
     const hitLocal = new THREE.Vector3();
-    function findMirrorHit(prevTip, tip) {
-      segmentDir.subVectors(tip, prevTip);
+    function findMirrorHit(from, to) {
+      segmentDir.subVectors(to, from);
       const length = segmentDir.length();
       if (length < 1e-9) return null;
       segmentDir.divideScalar(length);
       let best = null;
       for (const mirror of mirrors) {
-        const t = rayMirror(prevTip, segmentDir, mirror, 0, best ? best.t : length);
+        const t = rayMirror(from, segmentDir, mirror, 1e-6, best ? best.t : length);
         if (t === null) continue;
         // 当たった点が鏡の「面」なら反射、「木の枠」なら壁と同じ扱い
-        const point = prevTip.clone().addScaledVector(segmentDir, t);
+        const point = from.clone().addScaledVector(segmentDir, t);
         toMirrorLocal(mirror, point, hitLocal);
-        const onFace = isMirrorFace(hitLocal);
-        best = { mirror, t, point, onFace, remaining: length - t };
+        best = { mirror, t, point, onFace: isMirrorFace(hitLocal), remaining: length - t };
       }
       return best;
+    }
+
+    // 矢の先端を distance だけ進める（実際の矢とシミュレーションで共通）。
+    // 途中で鏡に当たれば反射し、1回の移動で何度でも正しく曲がる。
+    // state: { tip, dir, reflections }（書き換わる）
+    // 戻り値：{ segments: 通った線分 [{ start, dir, length }], corners: 反射した点, stopped: 鏡の枠・反射回数の上限で止まったか }
+    function advanceTip(state, distance) {
+      const segments = [];
+      const corners = [];
+      let remaining = distance;
+      for (;;) {
+        const end = state.tip.clone().addScaledVector(state.dir, remaining);
+        const hit = findMirrorHit(state.tip, end);
+        if (!hit) {
+          segments.push({ start: state.tip.clone(), dir: state.dir.clone(), length: remaining });
+          state.tip.copy(end);
+          return { segments, corners, stopped: false };
+        }
+        segments.push({ start: state.tip.clone(), dir: state.dir.clone(), length: hit.t });
+        state.tip.copy(hit.point);
+        // 鏡の木の枠に当たった、または反射回数の上限を超えたら止まる
+        if (!hit.onFace || state.reflections >= ARROW_MAX_REFLECTIONS) return { segments, corners, stopped: true };
+        // 反射：入射角＝反射角になるよう、面の向き（法線）成分だけを反転する
+        //   r = d - 2 (d・n) n   （上下方向の成分もこの式でそのまま正しく扱われる）
+        const n = hit.mirror.normal;
+        state.dir.addScaledVector(n, -2 * state.dir.dot(n)).normalize();
+        state.reflections++;
+        corners.push(hit.point.clone());
+        remaining = hit.remaining;
+      }
+    }
+
+    // 通った線分に重なる風船を、矢の進む順に返す（centers[i] は風船 i のその時刻の中心）
+    // 判定は線分と風船の交差で行うので、どんなに速く動いてもすり抜けない
+    function balloonsOnSegments(segments, centers, isTarget) {
+      const hits = [];
+      let traveled = 0;
+      for (const seg of segments) {
+        balloons.forEach((balloon, i) => {
+          if (!isTarget(i)) return;
+          const t = rayBalloon(seg.start, seg.dir, centers[i], 0, seg.length);
+          if (t !== null) hits.push({ index: i, at: traveled + t });
+        });
+        traveled += seg.length;
+      }
+      return hits.sort((a, b) => a.at - b.at);
     }
 
     // 矢を消す。1つ以上の風船を割っていたら「×N HIT!」を表示する。光の尾は薄くしながら消していく
@@ -1364,6 +1402,11 @@
     function isOutsideStage(p) {
       return p.x < stageBox.min.x || p.x > stageBox.max.x || p.z < stageBox.min.z || p.z > stageBox.max.z ||
              p.y > stageBox.max.y;
+    }
+
+    // 矢が止まる場所（床・射的台・壁・射的場の外）に先端があるか
+    function tipIsBlocked(tip) {
+      return colliders.some((box) => pointInBox(tip, box)) || isOutsideStage(tip);
     }
 
     // =========================================================
@@ -1426,54 +1469,35 @@
     }
 
     // 矢の移動・鏡での反射・命中判定
-    const arrowTip = new THREE.Vector3();
-    const prevTip = new THREE.Vector3();
     const trailHead = new THREE.Vector3();
+    const balloonCenters = () => balloons.map((b) => b.center);
     function updateArrows(dt) {
       shootCooldown = Math.max(0, shootCooldown - dt);
 
       for (let i = arrows.length - 1; i >= 0; i--) {
         const a = arrows[i];
-        // 重力なしで、今の向きにまっすぐ進む
-        prevTip.copy(a.mesh.position).addScaledVector(a.dir, ARROW_TIP_OFFSET);
-        a.mesh.position.addScaledVector(a.dir, ARROW_SPEED * dt);
-        arrowTip.copy(a.mesh.position).addScaledVector(a.dir, ARROW_TIP_OFFSET);
+        // 重力なしで、今の向きにまっすぐ進む（鏡に当たれば反射）
+        const move = advanceTip(a, ARROW_SPEED * dt);
         a.life -= dt;
         a.sinceCorner += ARROW_SPEED * dt;
-
-        // ---- 鏡 ----
-        const mirrorHit = findMirrorHit(prevTip, arrowTip);
-        if (mirrorHit) {
-          // 鏡の木の枠に当たった、または反射回数の上限を超えたら消える
-          if (!mirrorHit.onFace || a.reflections >= ARROW_MAX_REFLECTIONS) {
-            removeArrow(i);
-            continue;
-          }
-          // 反射：入射角＝反射角になるよう、面の向き（法線）成分だけを反転する
-          //   r = d - 2 (d・n) n   （上下方向の成分もこの式でそのまま正しく扱われる）
-          const n = mirrorHit.mirror.normal;
-          a.dir.addScaledVector(n, -2 * a.dir.dot(n)).normalize();
-          a.reflections++;
+        for (const corner of move.corners) {
           playSound('reflect');
-          // 鏡に当たった点から、このフレームで進み残した距離だけ新しい向きへ進める
-          arrowTip.copy(mirrorHit.point).addScaledVector(a.dir, mirrorHit.remaining);
-          a.mesh.position.copy(arrowTip).addScaledVector(a.dir, -ARROW_TIP_OFFSET);
-          a.mesh.quaternion.setFromUnitVectors(ARROW_FORWARD, a.dir);
-          // 光の尾：反射した点を曲がり角にする
-          addTrailCorner(a.trail, mirrorHit.point);
-          a.sinceCorner = mirrorHit.remaining;
+          addTrailCorner(a.trail, corner); // 光の尾：反射した点を曲がり角にする
         }
+        if (move.corners.length > 0) a.sinceCorner = move.segments[move.segments.length - 1].length;
+        a.mesh.position.copy(a.tip).addScaledVector(a.dir, -ARROW_TIP_OFFSET);
+        a.mesh.quaternion.setFromUnitVectors(ARROW_FORWARD, a.dir);
 
         // 光の尾の先端は矢の後ろ端に合わせる（反射直後は曲がり角より手前に戻らないようにする）
-        trailHead.copy(arrowTip).addScaledVector(a.dir, -Math.min(a.sinceCorner, ARROW_TIP_OFFSET + ARROW_LENGTH / 2));
+        trailHead.copy(a.tip).addScaledVector(a.dir, -Math.min(a.sinceCorner, ARROW_TIP_OFFSET + ARROW_LENGTH / 2));
         setTrailHead(a.trail, trailHead);
 
-        // ---- 風船・地形 ----
-        // 先端の位置で当たり判定（細かい時間刻みで更新しているので、すり抜けにくい）
-        // 風船は貫通する：まだ当たっていない風船なら割り、矢はそのまま進む
-        for (const balloon of balloons) {
-          if (balloon.state !== 'alive' || a.hitTargets.has(balloon)) continue;
-          if (!pointInBalloon(arrowTip, balloon)) continue;
+        // ---- 風船 ----
+        // 風船は貫通する：通った線分に重なる、まだ当たっていない風船を順に割り、矢はそのまま進む
+        const hits = balloonsOnSegments(move.segments, balloonCenters(),
+          (index) => balloons[index].state === 'alive' && !a.hitTargets.has(balloons[index]));
+        for (const { index } of hits) {
+          const balloon = balloons[index];
           a.hitTargets.add(balloon);
           popBalloon(balloon);
           // 点数：風船の点 ＋ この矢で何個目か（2個目以降はボーナス）
@@ -1481,18 +1505,58 @@
           a.points += points;
           addScore(points, a.hitTargets.size);
         }
-        const hitWall = colliders.some((box) => pointInBox(arrowTip, box)); // 床・射的台・衝立・壁
 
-        // 鏡以外に当たった、寿命が尽きた、または射的場の外へ出たら消す
-        if (hitWall || a.life <= 0 || isOutsideStage(arrowTip)) removeArrow(i);
+        // 鏡の枠・床・射的台・壁に当たった、寿命が尽きた、または射的場の外へ出たら消す
+        if (move.stopped || tipIsBlocked(a.tip) || a.life <= 0) removeArrow(i);
       }
+    }
+
+    // =========================================================
+    // シミュレーション（画面には出さない確認用）
+    // 撃ち方の一覧を、実際のゲームと同じ計算（shotFrom・advanceTip・balloonsOnSegments）で
+    // 1/120秒刻みに進めて、どの風船が割れるかを調べる。
+    // shots: [{ position, yaw, pitch, time }]（SOLUTION と同じ表示の単位）
+    // 戻り値：{ popped: 割れた数, score: 点数, shots: [{ popped: 割れた風船の番号（順番どおり）, reflections, points }] }
+    // =========================================================
+    function simulateShots(shots, step = 1 / 120) {
+      const alive = balloons.map(() => true);
+      const centers = balloons.map(() => new THREE.Vector3());
+      const results = shots.map(() => ({ popped: [], reflections: 0, points: 0 }));
+      const pending = shots.map((s, i) => ({ ...s, i })).sort((a, b) => a.time - b.time);
+      const flying = [];
+      let score = 0;
+      for (let t = 0; t < TIME_LIMIT && (pending.length > 0 || flying.length > 0); t += step) {
+        // 撃つ時刻になった矢を撃つ（実際のゲームと同じく、撃った次の刻みから進む）
+        while (pending.length > 0 && pending[0].time <= t + 1e-9) {
+          const s = pending.shift();
+          const shot = shotFrom(-s.position, -s.yaw, s.pitch); // 表示の単位（右が+）→ 内部の座標（左が+）
+          flying.push({ i: s.i, tip: shot.tip, dir: shot.dir, reflections: 0, life: ARROW_LIFETIME });
+        }
+        balloons.forEach((b, i) => balloonPositionAt(b, t + step, centers[i]));
+        for (let k = flying.length - 1; k >= 0; k--) {
+          const a = flying[k];
+          const r = results[a.i];
+          const move = advanceTip(a, ARROW_SPEED * step);
+          a.life -= step;
+          for (const { index } of balloonsOnSegments(move.segments, centers, (index) => alive[index])) {
+            alive[index] = false;
+            r.popped.push(index);
+            const points = (balloons[index].motion ? SCORE_GOLD : SCORE_NORMAL) + (r.popped.length - 1) * MULTI_HIT_BONUS;
+            r.points += points;
+            score += points;
+          }
+          r.reflections = a.reflections;
+          if (move.stopped || tipIsBlocked(a.tip) || a.life <= 0) flying.splice(k, 1);
+        }
+      }
+      return { popped: alive.filter((v) => !v).length, score, shots: results };
     }
 
     // =========================================================
     // 撃つ前の予測線
     // 照準の方向へ撃ったときの軌道を、GUIDE_REFLECTIONS 回目の反射までと、
     // その反射直後の短い線（GUIDE_AFTER_LENGTH）だけ薄く表示する。
-    // 風船は貫通するので無視し、床・射的台・衝立・壁・鏡の木の枠・射的場の外で線を止める。
+    // 風船は貫通するので無視し、床・射的台・壁・鏡の木の枠・射的場の外で線を止める。
     // =========================================================
     const GUIDE_MAX_POINTS = GUIDE_REFLECTIONS + 2;
     const guidePositions = new Float32Array(GUIDE_MAX_POINTS * 3);
@@ -1519,7 +1583,8 @@
       return Math.max(0, tExit);
     }
 
-    // 予測線の頂点を計算して書き込む。shot は computeShot() の結果
+    // 予測線の頂点を計算して書き込む。shot は shotFrom() の結果
+    // 戻り値：最初に当たる地点（照準の表示に使う）と、そこまでの間に風船があるか
     const guideHitLocal = new THREE.Vector3();
     function updateGuide(shot) {
       const pos = shot.tip.clone();
@@ -1534,7 +1599,7 @@
         if (!hit) { push(pos.addScaledVector(dir, maxDist)); break; } // マップの外まで何もない
         pos.addScaledVector(dir, hit.t);
         push(pos);
-        if (!hit.mirror) break; // 床・射的台・衝立・壁に当たったらそこで終わり
+        if (!hit.mirror) break; // 床・射的台・壁に当たったらそこで終わり
 
         // 鏡の木の枠なら矢はそこで消えるので、線もそこで終わり
         toMirrorLocal(hit.mirror, pos, guideHitLocal);
@@ -1553,6 +1618,23 @@
       }
       guideGeometry.setDrawRange(0, count);
       guideGeometry.attributes.position.needsUpdate = true;
+
+      // 最初にまっすぐ飛ぶ区間（発射 → 最初に当たる地点）に風船があれば、照準を赤くする
+      const firstHit = new THREE.Vector3().fromArray(guidePositions, 3);
+      const firstLength = firstHit.distanceTo(shot.tip);
+      const onTarget = balloons.some((b) => b.state === 'alive' && rayBalloon(shot.tip, shot.dir, b.center, 0, firstLength) !== null);
+      return { firstHit, onTarget };
+    }
+
+    // 照準（＋マーク）を、矢が最初に当たる地点の画面上の位置に置く
+    const crosshairPoint = new THREE.Vector3();
+    function placeCrosshair(point) {
+      camera.updateMatrixWorld();
+      crosshairPoint.copy(point).project(camera);
+      const x = THREE.MathUtils.clamp((crosshairPoint.x + 1) / 2, 0, 1) * window.innerWidth;
+      const y = THREE.MathUtils.clamp((1 - crosshairPoint.y) / 2, 0, 1) * window.innerHeight;
+      crosshairEl.style.left = `${x}px`;
+      crosshairEl.style.top = `${y}px`;
     }
 
     // 「×N HIT! +点数」を画面中央に1秒表示する
@@ -1617,15 +1699,27 @@
     // 入力（狙いのドラッグ）
     // スティックとSHOOTボタン以外（＝キャンバス）をドラッグすると狙う向きが変わる。
     // 左右は正面から ±AIM_YAW_LIMIT 度、上下は水平から ±AIM_PITCH_LIMIT 度まで。
+    // ドラッグの量はそのまま積み上げ、実際の角度は1度刻みに丸めてカチッと止める。
     // スティックとは別の指（pointerId）として扱うので、左手移動＋右手狙いが同時にできる。
     // PCではマウスの左ドラッグで同じように動かせる。
     // =========================================================
-    let cameraYaw = 0;    // 狙いの左右の角度（0 で正面 = +Z 方向。プラスで左）
-    let cameraPitch = 0;  // 狙いの上下の角度（0 で水平。プラスで見上げる）
-    const AIM_YAW_MAX = THREE.MathUtils.degToRad(AIM_YAW_LIMIT);
-    const AIM_PITCH_MAX = THREE.MathUtils.degToRad(AIM_PITCH_LIMIT);
+    let rawYawDeg = 0, rawPitchDeg = 0;    // ドラッグで動かしている途中の角度（丸める前）
+    let aimYawDeg = 0, aimPitchDeg = 0;    // 実際の狙いの角度（1度刻み）。横は + で左、縦は + で上
+    let cameraYaw = 0;    // カメラの左右の角度 [ラジアン]（aimYawDeg と同じ向き）
+    let cameraPitch = 0;  // カメラの上下の角度 [ラジアン]
     const look = { pointerId: null, lastX: 0, lastY: 0 };
     const canvasEl = renderer.domElement;
+
+    // 狙いの角度を設定する（範囲内に収め、1度刻みに丸める）
+    function setAim(yawDeg, pitchDeg) {
+      rawYawDeg = THREE.MathUtils.clamp(yawDeg, -AIM_YAW_LIMIT, AIM_YAW_LIMIT);
+      rawPitchDeg = THREE.MathUtils.clamp(pitchDeg, -AIM_PITCH_LIMIT, AIM_PITCH_LIMIT);
+      aimYawDeg = Math.round(rawYawDeg);
+      aimPitchDeg = Math.round(rawPitchDeg);
+      cameraYaw = THREE.MathUtils.degToRad(aimYawDeg);
+      cameraPitch = THREE.MathUtils.degToRad(aimPitchDeg);
+      refreshAimHud();
+    }
 
     canvasEl.addEventListener('pointerdown', (e) => {
       if (look.pointerId !== null) return;          // 狙いの操作はひとつの指だけで行う
@@ -1644,13 +1738,15 @@
       look.lastX = e.clientX;
       look.lastY = e.clientY;
       if (dx === 0 && dy === 0) return;
-      // 右へドラッグ → 右を向く（yaw が減る方向が右回り）
-      cameraYaw = THREE.MathUtils.clamp(cameraYaw - dx * CAMERA_YAW_SENSITIVITY, -AIM_YAW_MAX, AIM_YAW_MAX);
-      // 上へドラッグ → 見上げる。反転設定にも対応
-      const pitchDelta = -dy * CAMERA_PITCH_SENSITIVITY * (CAMERA_INVERT_Y ? -1 : 1);
-      cameraPitch = THREE.MathUtils.clamp(cameraPitch + pitchDelta, -AIM_PITCH_MAX, AIM_PITCH_MAX);
+      // 右へドラッグ → 右を向く。上へドラッグ → 見上げる（反転設定にも対応）
+      setAim(rawYawDeg - dx * CAMERA_YAW_SENSITIVITY,
+        rawPitchDeg - dy * CAMERA_PITCH_SENSITIVITY * (CAMERA_INVERT_Y ? -1 : 1));
     });
-    const endLook = (e) => { if (e.pointerId === look.pointerId) look.pointerId = null; };
+    const endLook = (e) => {
+      if (e.pointerId !== look.pointerId) return;
+      look.pointerId = null;
+      setAim(aimYawDeg, aimPitchDeg); // 指を離したら、丸めたあとの角度にそろえる
+    };
     canvasEl.addEventListener('pointerup', endLook);
     canvasEl.addEventListener('pointercancel', endLook);
     canvasEl.addEventListener('lostpointercapture', endLook);
@@ -1666,24 +1762,44 @@
     // =========================================================
     // ゲームの更新処理
     // =========================================================
+    // 立ち位置を1刻み動かす（dir: 右が+）。奥（+Z）を向いたとき画面の右は -X 方向
+    function stepPosition(dir) {
+      player.slotX = THREE.MathUtils.clamp(player.slotX - dir * MOVE_STEP, -PLAYER_X_LIMIT, PLAYER_X_LIMIT);
+      refreshAimHud();
+    }
+
     function update(dt) {
-      // 射的台の後ろを左右にだけ動く。奥（+Z）を向いたとき画面の右は -X 方向
+      // 射的台の後ろを、MOVE_STEP 刻みで左右にだけ動く。
+      // 押した瞬間に1刻み、押し続けると少し待ってから一定間隔で1刻みずつ動く
       const input = getMoveInput();
-      player.position.x = THREE.MathUtils.clamp(
-        player.position.x - input * MOVE_SPEED * dt, -PLAYER_X_LIMIT, PLAYER_X_LIMIT);
+      const dir = Math.abs(input) >= 0.5 ? Math.sign(input) : 0;
+      if (dir !== 0 && dir !== player.moveDir) {
+        stepPosition(dir);
+        player.moveRepeat = MOVE_REPEAT_DELAY;
+      } else if (dir !== 0) {
+        player.moveRepeat -= dt;
+        if (player.moveRepeat <= 0) {
+          stepPosition(dir);
+          player.moveRepeat = MOVE_REPEAT_INTERVAL;
+        }
+      }
+      player.moveDir = dir;
       // 体は狙っている向きに合わせる
       player.facing = cameraYaw;
     }
 
     // =========================================================
     // カメラ：プレイヤーの後ろ（少し右の肩越し）から、狙っている向きを見る
-    // 左右の移動にはふんわり追従し、狙いの角度は即座に反映する。
+    // 左右の移動にはふんわり追従し、狙いの角度は即座に反映する（矢の向きはカメラによらない）。
     // =========================================================
     const cameraFocus = new THREE.Vector3(); // カメラの基準点（プレイヤーの頭の後ろあたり。滑らかに追従）
     const focusGoal = new THREE.Vector3();
     const lookTarget = new THREE.Vector3();
 
     function updateCamera(dt, snap = false) {
+      // 見た目のプレイヤーを、刻みの立ち位置へ滑らかに動かす
+      if (snap) player.position.x = player.slotX;
+      else player.position.x += (player.slotX - player.position.x) * (1 - Math.exp(-CAMERA_SMOOTH * 2 * dt));
       const p = player.position;
       focusGoal.set(p.x, p.y + CAMERA_HEIGHT, p.z);
       if (snap) cameraFocus.copy(focusGoal);
@@ -1733,6 +1849,13 @@
     const hudArrowsEl = document.getElementById('hud-arrows');
     const hudTimeEl = document.getElementById('hud-time');
     const hudScoreEl = document.getElementById('hud-score');
+    const hudAimEl = document.getElementById('hud-aim');
+
+    // 上部の「位置 / 横 / 縦」を更新する（右が +、上が +。SOLUTION と同じ単位）
+    const signed = (v, digits = 0) => `${v > 0 ? '+' : ''}${(v === 0 ? 0 : v).toFixed(digits)}`;
+    function refreshAimHud() {
+      hudAimEl.textContent = `位置 ${signed(-player.slotX + 0, 1)}m / 横 ${signed(-aimYawDeg + 0)}° / 縦 ${signed(aimPitchDeg)}°`;
+    }
 
     // 状態を切り替え、それに合わせて画面の表示を変える
     function setState(state) {
@@ -1792,9 +1915,9 @@
       balloonRespawnTimer = 0;
       gameTime = 0;
       // プレイヤーと狙いを正面に戻す
-      player.position.x = 0;
-      cameraYaw = 0;
-      cameraPitch = 0;
+      player.slotX = 0;
+      player.moveDir = 0;
+      setAim(0, 0);
       shootCooldown = 0;
       updateCamera(0, true);
       refreshHud();
@@ -1886,18 +2009,24 @@
     const MAX_SUBSTEP = 1 / 120; // 高速移動ですり抜けないよう、細かく分割して更新
 
     updateCamera(0, true);
+    advanceBalloonTime(0);
+    setAim(0, 0);
     setState('title');
+    // 確認用：ブラウザのコンソールから simulateShots(SOLUTION) で満点ルートを試せる（画面には出さない）
+    window.mirrorShooting = { simulateShots, SOLUTION };
 
     function loop() {
       // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
       const dt = Math.min(clock.getDelta(), 0.1);
       const steps = Math.ceil(dt / MAX_SUBSTEP);
       for (let i = 0; i < steps; i++) {
+        // カウントダウン中は風船の動きを止めておき、「スタート！」から動きの時間を進める。
+        // 矢の当たり判定は、刻みごとにその時刻の風船の位置で行う
+        advanceBalloonTime(game.state === 'countdown' ? 0 : dt / steps);
         if (game.state === 'playing') update(dt / steps); // プレイヤーが動けるのはゲーム中だけ
         updateArrows(dt / steps);
       }
-      // カウントダウン中は風船の動きを止めておき、「スタート！」から動きの時間を進める
-      updateBalloons(dt, game.state === 'countdown' ? 0 : dt);
+      updateBalloons(dt);
       updateGame(dt);
       shootEl.classList.toggle('cooling', shootCooldown > 0 || game.arrowsLeft <= 0);
 
@@ -1906,11 +2035,12 @@
       playerMesh.rotation.y = player.facing;
 
       updateCamera(dt);
-      // ゲーム中は、照準が風船に重なっていれば照準を赤くし、予測線を更新する
-      if (game.state === 'playing') {
-        const shot = computeShot();
-        crosshairEl.classList.toggle('on-target', !!shot.aim.onTarget);
-        updateGuide(shot);
+      // ゲーム中は予測線を更新し、照準を「矢が最初に当たる地点」に置く。
+      // そこまでの間に風船があれば照準を赤くする
+      if (game.state === 'playing' || game.state === 'countdown') {
+        const aim = updateGuide(currentShot());
+        placeCrosshair(aim.firstHit);
+        crosshairEl.classList.toggle('on-target', aim.onTarget);
       }
       updateFadingTrails(dt);
       renderer.render(scene, camera);
