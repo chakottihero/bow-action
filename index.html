@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-  <title>3Dアクション試作（グレーボックス）</title>
+  <title>鏡射的</title>
   <style>
     html, body {
       margin: 0;
@@ -151,24 +151,151 @@
       pointer-events: none;
     }
 
-    /* 操作説明（左上） */
-    #help {
+    /* ===== 画面の状態ごとの表示切り替え =====
+       body の data-state に今の状態（title / countdown / playing / result）を入れる */
+    /* タイトルとリザルトでは、後ろの射的場をぼかして暗くする */
+    body[data-state="title"] canvas,
+    body[data-state="result"] canvas { filter: blur(6px) brightness(0.6); }
+    /* 操作ボタン・照準・上部の表示は、カウントダウンとゲーム中だけ出す */
+    body[data-state="title"] #stick, body[data-state="result"] #stick,
+    body[data-state="title"] #shoot, body[data-state="result"] #shoot,
+    body[data-state="title"] #crosshair, body[data-state="result"] #crosshair,
+    body[data-state="title"] #hud-top, body[data-state="result"] #hud-top { display: none; }
+
+    /* ===== ゲーム中の上部表示（残りの矢・残り時間・スコア） ===== */
+    #hud-top {
       position: fixed;
-      left: 12px;
-      right: 50px; /* 右上のバージョン表示と重ならないよう空けておく */
-      top: 10px;
+      left: 50%;
+      top: calc(8px + env(safe-area-inset-top));
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      padding: 6px 16px;
+      border-radius: 18px;
+      background: rgba(0, 0, 0, 0.4);
       color: #fff;
-      font-size: 12px;
+      font-size: clamp(14px, 4vw, 18px);
+      font-weight: bold;
+      white-space: nowrap;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
       pointer-events: none;
     }
+    #hud-top .label { font-size: 0.75em; opacity: 0.8; margin-right: 4px; }
+    /* 残り時間が少なくなったら赤くする */
+    #hud-time.warning { color: #ff4a3a; }
+
+    /* ===== タイトル画面・リザルト画面（射的場の上に重ねる） ===== */
+    .screen {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 16px;
+      color: #fff;
+      text-align: center;
+      background: rgba(5, 8, 30, 0.3);
+      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+      touch-action: none;
+    }
+    .screen.show { display: flex; }
+    .screen h1 {
+      margin: 0;
+      font-size: clamp(48px, 13vw, 96px);
+      letter-spacing: 0.15em;
+      text-shadow: 0 4px 0 #a01010, 0 0 24px rgba(255, 90, 40, 0.8);
+    }
+    .screen h2 { margin: 0; font-size: 26px; letter-spacing: 0.2em; }
+    .screen .help { font-size: 12px; opacity: 0.85; max-width: 32em; }
+    .screen .best { font-size: 16px; }
+    .buttons { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    .btn {
+      padding: 10px 36px;
+      border: 2px solid #fff;
+      border-radius: 28px;
+      background: #d8202a;
+      color: #fff;
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 3px 0 #7a0a0a;
+    }
+    .btn.sub { background: rgba(255, 255, 255, 0.15); box-shadow: none; }
+    #result-score { font-size: 56px; font-weight: bold; color: #ffe14d; line-height: 1; }
+    #result-score small { font-size: 22px; margin-left: 4px; color: #fff; }
+    .result-rows { display: grid; grid-template-columns: auto auto; gap: 2px 18px; font-size: 16px; }
+    .result-rows dt { text-align: right; opacity: 0.8; }
+    .result-rows dd { margin: 0; text-align: left; font-weight: bold; }
+    #new-record {
+      display: none;
+      color: #ffe14d;
+      font-size: 24px;
+      font-weight: bold;
+      animation: record-blink 0.6s ease-in-out infinite alternate;
+    }
+    #new-record.show { display: block; }
+    @keyframes record-blink { from { opacity: 1; transform: scale(1.05); } to { opacity: 0.6; transform: scale(1); } }
+
+    /* ===== カウントダウン（3・2・1・スタート！） ===== */
+    #countdown {
+      position: fixed;
+      left: 50%;
+      top: 42%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: clamp(64px, 18vw, 120px);
+      font-weight: bold;
+      white-space: nowrap;
+      text-shadow: 0 4px 0 #a01010, 0 0 20px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+      display: none;
+    }
+    #countdown.show { display: block; animation: count-pop 0.9s ease-out forwards; }
+    @keyframes count-pop {
+      0%   { transform: translate(-50%, -50%) scale(1.6); opacity: 0; }
+      15%  { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+      75%  { opacity: 1; }
+      100% { transform: translate(-50%, -50%) scale(0.9); opacity: 0; }
+    }
   </style>
 </head>
-<body>
+<body data-state="title">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v0.11</div>
+  <div id="version">v1.0</div>
   <div id="sound">🔊</div>
-  <div id="help">移動: スティック左右 / A・D ・ 狙い: 画面をドラッグ ・ 射撃: ボタン / 右クリック / F ・ 鏡で反射させて衝立の裏の風船も割ろう</div>
+  <!-- ゲーム中の上部表示 -->
+  <div id="hud-top">
+    <span><span class="label">矢</span><span id="hud-arrows">10</span></span>
+    <span><span class="label">残り</span><span id="hud-time">60</span></span>
+    <span><span class="label">スコア</span><span id="hud-score">0</span></span>
+  </div>
+  <div id="countdown"></div>
+  <!-- タイトル画面 -->
+  <div id="title-screen" class="screen">
+    <h1>鏡射的</h1>
+    <button id="start-btn" class="btn">スタート</button>
+    <div class="best">ベストスコア：<span id="title-best">0</span>点</div>
+    <div class="help">移動: スティック左右 / A・D ・ 狙い: 画面をドラッグ ・ 射撃: SHOOT / 右クリック / F<br>
+      鏡で矢を反射させて、衝立の裏の風船も割ろう。1本でまとめて割るとボーナス！</div>
+  </div>
+  <!-- リザルト画面 -->
+  <div id="result-screen" class="screen">
+    <h2>結果</h2>
+    <div id="new-record">NEW RECORD!</div>
+    <div id="result-score">0<small>点</small></div>
+    <dl class="result-rows">
+      <dt>割った数</dt><dd id="result-popped">0個</dd>
+      <dt>最大同時割り</dt><dd id="result-multi">×0</dd>
+      <dt>ベストスコア</dt><dd id="result-best">0点</dd>
+    </dl>
+    <div class="buttons">
+      <button id="retry-btn" class="btn">もう一度</button>
+      <button id="to-title-btn" class="btn sub">タイトルへ</button>
+    </div>
+  </div>
   <div id="stick"><div id="stick-knob"></div></div>
   <div id="shoot">SHOOT</div>
   <div id="crosshair"></div>
@@ -188,6 +315,17 @@
     const PLAYER_RADIUS = 0.5;      // 主人公（カプセル）の半径
     const PLAYER_HEIGHT = 2.0;      // 主人公の全高（足元〜頭）
     const MOVE_SPEED = 4.0;         // 射的台の後ろを左右に動く速さ [m/s]
+
+    // ---- ゲームのルール ----
+    const ARROW_COUNT = 10;         // 1ゲームで撃てる矢の本数
+    const TIME_LIMIT = 60;          // 制限時間 [秒]
+    const SCORE_NORMAL = 1;         // 止まっている風船の点数
+    const SCORE_GOLD = 3;           // 金色の（動く）風船の点数
+    const MULTI_HIT_BONUS = 1;      // 1本で複数割ったときのボーナス：2個目以降、1個ごとにこの点数ずつ増える
+                                    //   （止まった風船を ×3 なら 1 + (1+1) + (1+2) = 6点）
+    const WARNING_TIME = 10;        // 残り時間がこの秒数以下になったら赤く表示し、毎秒「ピッ」と鳴らす
+    const COUNTDOWN_STEP = 1.0;     // カウントダウン「3・2・1」の1つあたりの時間 [秒]
+    const BEST_SCORE_KEY = 'mirror-shooting-best'; // ベストスコアを保存する localStorage のキー
 
     // ---- 射的場の大きさ ----
     // 座標：射的台の手前の面が z=0。プレイヤーは z<0 側に立ち、+Z 方向（奥）を向く
@@ -295,6 +433,8 @@
       shoot: 0.5,   // 矢を撃つ「ヒュッ」
       pop: 0.7,     // 風船が割れる「パンッ」
       reflect: 0.5, // 矢が鏡で反射「キンッ」
+      beep: 0.45,   // カウントダウン・残り時間わずか「ピッ」
+      beepStart: 0.5, // カウントダウンの「スタート！」
     };
 
     // =========================================================
@@ -419,6 +559,28 @@
         osc.start(t);
         osc.stop(t + 0.09);
         return [burst, osc];
+      },
+      // ピッ：短い高めのサイン波
+      beep(ctx, t, out) {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1000, t);
+        const env = envelope(ctx, t, 1.0, 0.003, 0.1);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.11);
+        return [osc];
+      },
+      // スタート！の「ピーッ」：ピッより高く、少し長く
+      beepStart(ctx, t, out) {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1500, t);
+        const env = envelope(ctx, t, 1.0, 0.003, 0.45);
+        osc.connect(env).connect(out);
+        osc.start(t);
+        osc.stop(t + 0.46);
+        return [osc];
       },
       // キンッ：倍音関係にない高い2音を重ねて金属っぽくし、すっと減衰させる
       reflect(ctx, t, out) {
@@ -904,8 +1066,9 @@
     }
 
     // 風船の動き・全部割れたときの復活・破片を更新する
-    function updateBalloons(dt) {
-      gameTime += dt;
+    // timeStep は風船の動きの時間を進める量（カウントダウン中は 0 にして止めておく）
+    function updateBalloons(dt, timeStep = dt) {
+      gameTime += timeStep;
       // 金色の風船はゆっくり明滅させて、動く風船だとひと目で分かるようにする
       goldGlow = 0.25 + 0.25 * Math.sin(gameTime * BALLOON_GOLD_GLOW_SPEED);
       for (const balloon of balloons) {
@@ -1042,10 +1205,12 @@
       return { aim, dir, position, tip };
     }
 
-    // 矢を1本撃つ（クールダウン中なら何もしない）
+    // 矢を1本撃つ（ゲーム中でない・矢が残っていない・クールダウン中なら何もしない）
     function shoot() {
-      if (shootCooldown > 0) return;
+      if (game.state !== 'playing' || game.arrowsLeft <= 0 || shootCooldown > 0) return;
       shootCooldown = SHOOT_COOLDOWN;
+      game.arrowsLeft--;
+      refreshHud();
       playSound('shoot');
 
       const { dir, position, tip } = computeShot();
@@ -1062,6 +1227,7 @@
         life: ARROW_LIFETIME,
         reflections: 0,        // 鏡で反射した回数
         hitTargets: new Set(), // この矢がすでに割った風船（同じ風船に2回当たらないように）
+        points: 0,             // この矢で取った点数（ボーナス込み）
         trail: createTrail(tip), // 光の尾
         sinceCorner: 0,        // 発射・最後の反射から進んだ距離（尾の描き方に使う）
       });
@@ -1186,7 +1352,7 @@
       scene.remove(a.mesh);
       arrows.splice(index, 1);
       fadingTrails.push({ trail: a.trail, time: TRAIL_FADE_TIME });
-      if (a.hitTargets.size > 0) showHitCount(a.hitTargets.size);
+      if (a.hitTargets.size > 0) showHitCount(a.hitTargets.size, a.points);
     }
 
     // 矢が飛んでいてよい範囲（射的場のまわり）。この外へ出た矢はすぐ消す
@@ -1310,6 +1476,10 @@
           if (!pointInBalloon(arrowTip, balloon)) continue;
           a.hitTargets.add(balloon);
           popBalloon(balloon);
+          // 点数：風船の点 ＋ この矢で何個目か（2個目以降はボーナス）
+          const points = (balloon.motion ? SCORE_GOLD : SCORE_NORMAL) + (a.hitTargets.size - 1) * MULTI_HIT_BONUS;
+          a.points += points;
+          addScore(points, a.hitTargets.size);
         }
         const hitWall = colliders.some((box) => pointInBox(arrowTip, box)); // 床・射的台・衝立・壁
 
@@ -1385,10 +1555,10 @@
       guideGeometry.attributes.position.needsUpdate = true;
     }
 
-    // 「×N HIT!」を画面中央に1秒表示する
+    // 「×N HIT! +点数」を画面中央に1秒表示する
     const hitPopupEl = document.getElementById('hit-popup');
-    function showHitCount(count) {
-      hitPopupEl.textContent = `×${count} HIT!`;
+    function showHitCount(count, points) {
+      hitPopupEl.textContent = `×${count} HIT! +${points}`;
       // アニメーションを最初からやり直すため、一度クラスを外して再計算させてから付け直す
       hitPopupEl.classList.remove('show');
       void hitPopupEl.offsetWidth;
@@ -1459,6 +1629,7 @@
 
     canvasEl.addEventListener('pointerdown', (e) => {
       if (look.pointerId !== null) return;          // 狙いの操作はひとつの指だけで行う
+      if (game.state !== 'playing') return;         // ゲーム中だけ狙いを動かせる
       if (e.pointerType === 'mouse' && e.button !== 0) return; // マウスは左ボタンのみ
       look.pointerId = e.pointerId;
       look.lastX = e.clientX;
@@ -1533,33 +1704,214 @@
     }
 
     // =========================================================
+    // ゲームの流れ：タイトル → カウントダウン → ゲーム中 → リザルト
+    // =========================================================
+    const game = {
+      state: 'title',     // 'title' / 'countdown' / 'playing' / 'result'
+      arrowsLeft: ARROW_COUNT,
+      timeLeft: TIME_LIMIT,
+      score: 0,
+      popped: 0,          // 割った風船の数
+      maxMulti: 0,        // 1本で同時に割った最大数
+      countdownTime: 0,   // カウントダウン開始からの経過時間
+      countdownStep: -1,  // 今表示しているカウントダウンの段階（0:「3」〜 3:「スタート！」）
+      lastSecond: 0,      // 前回表示した残り秒数（毎秒の「ピッ」に使う）
+    };
+
+    // ベストスコアの読み書き（保存できない環境でも動くよう try で囲む）
+    function loadBestScore() {
+      try { return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0; } catch (e) { return 0; }
+    }
+    function saveBestScore(score) {
+      try { localStorage.setItem(BEST_SCORE_KEY, String(score)); } catch (e) { /* 何もしない */ }
+    }
+    let bestScore = loadBestScore();
+
+    const titleScreenEl = document.getElementById('title-screen');
+    const resultScreenEl = document.getElementById('result-screen');
+    const countdownEl = document.getElementById('countdown');
+    const hudArrowsEl = document.getElementById('hud-arrows');
+    const hudTimeEl = document.getElementById('hud-time');
+    const hudScoreEl = document.getElementById('hud-score');
+
+    // 状態を切り替え、それに合わせて画面の表示を変える
+    function setState(state) {
+      game.state = state;
+      document.body.dataset.state = state; // CSS でぼかし・操作ボタンの表示を切り替える
+      titleScreenEl.classList.toggle('show', state === 'title');
+      resultScreenEl.classList.toggle('show', state === 'result');
+      guideLine.visible = state === 'playing';
+      resetStick();
+      look.pointerId = null;
+    }
+
+    // 上部の表示（残りの矢・残り時間・スコア）を更新する
+    function refreshHud() {
+      hudArrowsEl.textContent = game.arrowsLeft;
+      hudTimeEl.textContent = Math.ceil(game.timeLeft);
+      hudTimeEl.classList.toggle('warning', game.timeLeft <= WARNING_TIME);
+      hudScoreEl.textContent = game.score;
+    }
+
+    // 風船を割ったときに点数を足す（hitIndex はその矢で何個目か）
+    function addScore(points, hitIndex) {
+      if (game.state !== 'playing') return;
+      game.score += points;
+      game.popped++;
+      game.maxMulti = Math.max(game.maxMulti, hitIndex);
+      refreshHud();
+    }
+
+    // 1ゲーム分の状態を完全に最初に戻す（風船の配置・動きの時間・矢・プレイヤーの位置と向き）
+    function resetRound() {
+      game.arrowsLeft = ARROW_COUNT;
+      game.timeLeft = TIME_LIMIT;
+      game.score = 0;
+      game.popped = 0;
+      game.maxMulti = 0;
+      game.lastSecond = TIME_LIMIT;
+      // 飛んでいる矢と光の尾を消す（「×N HIT!」は出さない）
+      for (const a of arrows) {
+        scene.remove(a.mesh, a.trail.line);
+        a.trail.line.geometry.dispose();
+        a.trail.line.material.dispose();
+      }
+      arrows.length = 0;
+      for (const f of fadingTrails) {
+        scene.remove(f.trail.line);
+        f.trail.line.geometry.dispose();
+        f.trail.line.material.dispose();
+      }
+      fadingTrails.length = 0;
+      hitPopupEl.classList.remove('show');
+      // 風船を全部元に戻し、動きの時間も 0 に戻す（毎回まったく同じ動きから始まる）
+      for (const balloon of balloons) {
+        balloon.state = 'alive';
+        balloon.group.visible = true;
+      }
+      balloonRespawnTimer = 0;
+      gameTime = 0;
+      // プレイヤーと狙いを正面に戻す
+      player.position.x = 0;
+      cameraYaw = 0;
+      cameraPitch = 0;
+      shootCooldown = 0;
+      updateCamera(0, true);
+      refreshHud();
+    }
+
+    // スタート：カウントダウンを始める
+    function startCountdown() {
+      resetRound();
+      game.countdownTime = 0;
+      game.countdownStep = -1;
+      setState('countdown');
+    }
+
+    // カウントダウンの文字を出す（毎回アニメーションを最初からやり直す）
+    function showCountdown(text) {
+      countdownEl.textContent = text;
+      countdownEl.classList.remove('show');
+      void countdownEl.offsetWidth;
+      countdownEl.classList.add('show');
+    }
+    countdownEl.addEventListener('animationend', () => countdownEl.classList.remove('show'));
+
+    // ゲーム終了：リザルト画面を出し、ベストスコアを更新する
+    function endGame() {
+      // 時間切れのときに飛んでいた矢は消す（点数には入れない）
+      for (const a of arrows) {
+        scene.remove(a.mesh);
+        fadingTrails.push({ trail: a.trail, time: TRAIL_FADE_TIME });
+      }
+      arrows.length = 0;
+
+      const isNewRecord = game.score > bestScore;
+      if (isNewRecord) {
+        bestScore = game.score;
+        saveBestScore(bestScore);
+      }
+      document.getElementById('result-score').firstChild.textContent = game.score;
+      document.getElementById('result-popped').textContent = `${game.popped}個`;
+      document.getElementById('result-multi').textContent = `×${game.maxMulti}`;
+      document.getElementById('result-best').textContent = `${bestScore}点`;
+      document.getElementById('new-record').classList.toggle('show', isNewRecord);
+      document.getElementById('title-best').textContent = bestScore;
+      setState('result');
+    }
+
+    // 状態ごとの毎フレームの処理
+    const COUNTDOWN_TEXTS = ['3', '2', '1', 'スタート！'];
+    function updateGame(dt) {
+      if (game.state === 'countdown') {
+        game.countdownTime += dt;
+        const step = Math.floor(game.countdownTime / COUNTDOWN_STEP);
+        if (step !== game.countdownStep) {
+          game.countdownStep = step;
+          showCountdown(COUNTDOWN_TEXTS[step]);
+          // 「スタート！」が出た瞬間からゲーム開始
+          if (step >= 3) {
+            playSound('beepStart');
+            setState('playing');
+          } else {
+            playSound('beep');
+          }
+        }
+        return;
+      }
+
+      if (game.state === 'playing') {
+        game.timeLeft = Math.max(0, game.timeLeft - dt);
+        // 残り時間わずか：秒が変わるたびに「ピッ」
+        const second = Math.ceil(game.timeLeft);
+        if (second !== game.lastSecond) {
+          game.lastSecond = second;
+          if (second <= WARNING_TIME && second > 0) playSound('beep');
+        }
+        refreshHud();
+        // 時間切れ、または矢を全部撃ち終えて最後の矢が消えたら終了
+        if (game.timeLeft <= 0 || (game.arrowsLeft === 0 && arrows.length === 0)) endGame();
+      }
+    }
+
+    document.getElementById('start-btn').addEventListener('click', startCountdown);
+    document.getElementById('retry-btn').addEventListener('click', startCountdown);
+    document.getElementById('to-title-btn').addEventListener('click', () => setState('title'));
+    document.getElementById('title-best').textContent = bestScore;
+
+    // =========================================================
     // メインループ
     // =========================================================
     const clock = new THREE.Clock();
     const MAX_SUBSTEP = 1 / 120; // 高速移動ですり抜けないよう、細かく分割して更新
 
     updateCamera(0, true);
+    setState('title');
 
     function loop() {
       // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
       const dt = Math.min(clock.getDelta(), 0.1);
       const steps = Math.ceil(dt / MAX_SUBSTEP);
       for (let i = 0; i < steps; i++) {
-        update(dt / steps);
+        if (game.state === 'playing') update(dt / steps); // プレイヤーが動けるのはゲーム中だけ
         updateArrows(dt / steps);
       }
-      updateBalloons(dt);
-      shootEl.classList.toggle('cooling', shootCooldown > 0);
+      // カウントダウン中は風船の動きを止めておき、「スタート！」から動きの時間を進める
+      updateBalloons(dt, game.state === 'countdown' ? 0 : dt);
+      updateGame(dt);
+      shootEl.classList.toggle('cooling', shootCooldown > 0 || game.arrowsLeft <= 0);
 
       // 見た目を物理状態に合わせる
       playerMesh.position.copy(player.position);
       playerMesh.rotation.y = player.facing;
 
       updateCamera(dt);
-      // 照準が風船に重なっていれば照準を赤くし、予測線を更新する
-      const shot = computeShot();
-      crosshairEl.classList.toggle('on-target', !!shot.aim.onTarget);
-      updateGuide(shot);
+      // ゲーム中は、照準が風船に重なっていれば照準を赤くし、予測線を更新する
+      if (game.state === 'playing') {
+        const shot = computeShot();
+        crosshairEl.classList.toggle('on-target', !!shot.aim.onTarget);
+        updateGuide(shot);
+      }
       updateFadingTrails(dt);
       renderer.render(scene, camera);
       requestAnimationFrame(loop);
