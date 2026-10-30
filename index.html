@@ -241,8 +241,39 @@
       box-shadow: 0 3px 0 #7a0a0a;
     }
     .btn.sub { background: rgba(255, 255, 255, 0.15); box-shadow: none; }
+    /* スコアとクリアタイムを横に並べる */
+    .result-main { display: flex; align-items: baseline; justify-content: center; gap: 24px; flex-wrap: wrap; }
     #result-score { font-size: 56px; font-weight: bold; color: #ffe14d; line-height: 1; }
     #result-score small { font-size: 22px; margin-left: 4px; color: #fff; }
+    #result-time { font-size: 28px; font-weight: bold; }
+    #result-time small { font-size: 16px; opacity: 0.8; margin-right: 6px; }
+
+    /* ===== 全部割ったときの「ALL CLEAR!  23.47秒」 ===== */
+    #all-clear {
+      position: fixed;
+      left: 50%;
+      top: 58%; /* 最後の矢の「×N HIT!」（上寄り）と重ならない高さ */
+      transform: translate(-50%, -50%);
+      display: none;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: baseline;
+      gap: 0 0.6em;
+      width: 90vw;
+      color: #ffe14d;
+      font-weight: bold;
+      text-align: center;
+      text-shadow: 0 4px 0 #a01010, 0 0 20px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+      z-index: 5;
+    }
+    #all-clear.show { display: flex; animation: all-clear-pop 0.5s ease-out; }
+    #all-clear .title { font-size: clamp(44px, 12vw, 84px); }
+    #all-clear .time { font-size: clamp(32px, 8vw, 56px); color: #fff; }
+    @keyframes all-clear-pop {
+      from { transform: translate(-50%, -50%) scale(1.5); opacity: 0; }
+      to   { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    }
     .result-rows { display: grid; grid-template-columns: auto auto; gap: 2px 18px; font-size: 16px; }
     .result-rows dt { text-align: right; opacity: 0.8; }
     .result-rows dd { margin: 0; text-align: left; font-weight: bold; }
@@ -281,7 +312,7 @@
 </head>
 <body data-state="title">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v1.1</div>
+  <div id="version">v1.2</div>
   <div id="sound">🔊</div>
   <!-- ゲーム中の上部表示 -->
   <div id="hud-top">
@@ -291,11 +322,12 @@
   </div>
   <div id="hud-aim"></div>
   <div id="countdown"></div>
+  <div id="all-clear"><span class="title">ALL CLEAR!</span><span class="time"></span></div>
   <!-- タイトル画面 -->
   <div id="title-screen" class="screen">
     <h1>鏡射的</h1>
     <button id="start-btn" class="btn">スタート</button>
-    <div class="best">ベストスコア：<span id="title-best">0</span>点</div>
+    <div class="best">自分のベスト：<span id="title-best">まだ記録なし</span></div>
     <div class="help">移動: スティック左右 / A・D（0.5m刻み） ・ 狙い: 画面をドラッグ（1度刻み） ・ 射撃: SHOOT / 右クリック / F<br>
       矢は6本。鏡で反射させて、1本でまとめて割るとボーナス！ 全部割れる撃ち方が必ずある。</div>
   </div>
@@ -303,11 +335,14 @@
   <div id="result-screen" class="screen">
     <h2>結果</h2>
     <div id="new-record">NEW RECORD!</div>
-    <div id="result-score">0<small>点</small></div>
+    <div class="result-main">
+      <div id="result-score">0<small>点</small></div>
+      <div id="result-time"><small>タイム</small><span>0.00秒</span></div>
+    </div>
     <dl class="result-rows">
       <dt>割った数</dt><dd id="result-popped">0個</dd>
       <dt>最大同時割り</dt><dd id="result-multi">×0</dd>
-      <dt>ベストスコア</dt><dd id="result-best">0点</dd>
+      <dt>自分のベスト</dt><dd id="result-best">0点</dd>
     </dl>
     <div class="buttons">
       <button id="retry-btn" class="btn">もう一度</button>
@@ -345,7 +380,8 @@
                                     //   （止まった風船を ×3 なら 1 + (1+1) + (1+2) = 6点）
     const WARNING_TIME = 10;        // 残り時間がこの秒数以下になったら赤く表示し、毎秒「ピッ」と鳴らす
     const COUNTDOWN_STEP = 1.0;     // カウントダウン「3・2・1」の1つあたりの時間 [秒]
-    const BEST_SCORE_KEY = 'mirror-shooting-best'; // ベストスコアを保存する localStorage のキー
+    const BEST_SCORE_KEY = 'mirror-shooting-best'; // 自分のベスト（スコアとクリアタイム）を保存する localStorage のキー
+    const ALL_CLEAR_SHOW_TIME = 2.5; // 全部割ったとき「ALL CLEAR!」を表示してからリザルトへ進むまでの時間 [秒]
 
     // ---- 射的場の大きさ ----
     // 座標：射的台の手前の面が z=0。プレイヤーは z<0 側に立ち、+Z 方向（奥）を向く
@@ -392,14 +428,15 @@
 
     // ---- 満点ルート（確認用。ゲーム画面には出さない） ----
     // position: 立ち位置 [m]（射的台の中央が 0、右が +）、yaw: 横の角度 [度]（右が +）、
-    // pitch: 縦の角度 [度]（上が +）、time: 撃つタイミング（ゲーム開始＝「スタート！」からの秒数）
+    // pitch: 縦の角度 [度]（上が +）、time: 撃つタイミング（ゲーム開始＝「スタート！」からの秒数）。
+    // 金色の風船は6秒ごとに軌道を通るので、撃てる時刻は他にもある（一覧と最速タイムは solution.md）
     // 画面上部の「位置 / 横 / 縦」の表示と同じ単位。5本で20個すべて割れる（詳しくは solution.md）
     const SOLUTION = [
-      { position: 0.0, yaw: 35, pitch: 0, time: 8 }, // ルート1：反射3回（鏡0→1→2）
-      { position: 1.5, yaw: -18, pitch: 15, time: 18 }, // ルート2：反射2回（鏡4→5）
-      { position: 0.0, yaw: -32, pitch: 2, time: 28 }, // ルート3：反射2回（鏡3→5）
-      { position: -3.5, yaw: -45, pitch: 11, time: 38 }, // ルート4：反射2回（鏡2→4）
-      { position: 3.5, yaw: 19, pitch: 4, time: 48 }, // ルート5：反射1回（鏡0）
+      { position: 0.0, yaw: 35, pitch: 0, time: 3 }, // ルート1：反射3回（鏡0→1→2）
+      { position: 1.5, yaw: -18, pitch: 15, time: 7 }, // ルート2：反射2回（鏡4→5）
+      { position: 0.0, yaw: -32, pitch: 2, time: 11 }, // ルート3：反射2回（鏡3→5）
+      { position: -3.5, yaw: -45, pitch: 11, time: 15 }, // ルート4：反射2回（鏡2→4）
+      { position: 3.5, yaw: 19, pitch: 4, time: 19 }, // ルート5：反射1回（鏡0）
     ];
 
     // ---- 見た目：風船 ----
@@ -1516,12 +1553,14 @@
     // 撃ち方の一覧を、実際のゲームと同じ計算（shotFrom・advanceTip・balloonsOnSegments）で
     // 1/120秒刻みに進めて、どの風船が割れるかを調べる。
     // shots: [{ position, yaw, pitch, time }]（SOLUTION と同じ表示の単位）
-    // 戻り値：{ popped: 割れた数, score: 点数, shots: [{ popped: 割れた風船の番号（順番どおり）, reflections, points }] }
+    // 戻り値：{ popped: 割れた数, score: 点数, clearTime: 最後に割れた時刻,
+    //          shots: [{ popped: 割れた風船の番号（順番どおり）, popTimes: 割れた時刻, reflections, points }] }
     // =========================================================
     function simulateShots(shots, step = 1 / 120) {
       const alive = balloons.map(() => true);
       const centers = balloons.map(() => new THREE.Vector3());
-      const results = shots.map(() => ({ popped: [], reflections: 0, points: 0 }));
+      const results = shots.map(() => ({ popped: [], popTimes: [], reflections: 0, points: 0 }));
+      let clearTime = null;
       const pending = shots.map((s, i) => ({ ...s, i })).sort((a, b) => a.time - b.time);
       const flying = [];
       let score = 0;
@@ -1541,6 +1580,10 @@
           for (const { index } of balloonsOnSegments(move.segments, centers, (index) => alive[index])) {
             alive[index] = false;
             r.popped.push(index);
+            // 実際のゲームと同じく、割れた刻みの終わりの時刻を 0.01 秒単位で記録する
+            const popTime = Math.round((t + step) * 100) / 100;
+            r.popTimes.push(popTime);
+            clearTime = popTime;
             const points = (balloons[index].motion ? SCORE_GOLD : SCORE_NORMAL) + (r.popped.length - 1) * MULTI_HIT_BONUS;
             r.points += points;
             score += points;
@@ -1549,7 +1592,7 @@
           if (move.stopped || tipIsBlocked(a.tip) || a.life <= 0) flying.splice(k, 1);
         }
       }
-      return { popped: alive.filter((v) => !v).length, score, shots: results };
+      return { popped: alive.filter((v) => !v).length, score, clearTime, shots: results };
     }
 
     // =========================================================
@@ -1823,7 +1866,7 @@
     // ゲームの流れ：タイトル → カウントダウン → ゲーム中 → リザルト
     // =========================================================
     const game = {
-      state: 'title',     // 'title' / 'countdown' / 'playing' / 'result'
+      state: 'title',     // 'title' / 'countdown' / 'playing' / 'allclear'（全部割った直後） / 'result'
       arrowsLeft: ARROW_COUNT,
       timeLeft: TIME_LIMIT,
       score: 0,
@@ -1832,16 +1875,38 @@
       countdownTime: 0,   // カウントダウン開始からの経過時間
       countdownStep: -1,  // 今表示しているカウントダウンの段階（0:「3」〜 3:「スタート！」）
       lastSecond: 0,      // 前回表示した残り秒数（毎秒の「ピッ」に使う）
+      clearTime: null,    // クリアタイム：「スタート！」から最後に風船を割った瞬間まで [秒]（1個も割れていなければ null）
+      allClearTimer: 0,   // 「ALL CLEAR!」を表示している残り時間
     };
 
-    // ベストスコアの読み書き（保存できない環境でも動くよう try で囲む）
-    function loadBestScore() {
-      try { return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0; } catch (e) { return 0; }
+    // 自分のベスト { score, time } の読み書き（保存できない環境でも動くよう try で囲む）
+    // 以前のバージョンはスコアの数字だけを保存していたので、その場合はタイムなしとして読む
+    function loadBest() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(BEST_SCORE_KEY));
+        if (typeof saved === 'number') return { score: saved, time: null };
+        if (saved && typeof saved.score === 'number') return { score: saved.score, time: saved.time ?? null };
+      } catch (e) { /* 読めなければ記録なし */ }
+      return { score: 0, time: null };
     }
-    function saveBestScore(score) {
-      try { localStorage.setItem(BEST_SCORE_KEY, String(score)); } catch (e) { /* 何もしない */ }
+    function saveBest(record) {
+      try { localStorage.setItem(BEST_SCORE_KEY, JSON.stringify(record)); } catch (e) { /* 何もしない */ }
     }
-    let bestScore = loadBestScore();
+    let best = loadBest();
+
+    // 新しい記録が自分のベストより良いか：スコアが高い方、同点ならタイムが速い方
+    function isBetter(record, than) {
+      if (record.score !== than.score) return record.score > than.score;
+      return record.time !== null && (than.time === null || record.time < than.time);
+    }
+
+    // タイム・記録の表示用の文字列
+    const formatTime = (time) => (time === null ? '―' : `${time.toFixed(2)}秒`);
+    const formatRecord = (record) => (record.time === null ? `${record.score}点` : `${record.score}点 / ${formatTime(record.time)}`);
+    function refreshTitleBest() {
+      const empty = best.score === 0 && best.time === null;
+      document.getElementById('title-best').textContent = empty ? 'まだ記録なし' : formatRecord(best);
+    }
 
     const titleScreenEl = document.getElementById('title-screen');
     const resultScreenEl = document.getElementById('result-screen');
@@ -1857,12 +1922,15 @@
       hudAimEl.textContent = `位置 ${signed(-player.slotX + 0, 1)}m / 横 ${signed(-aimYawDeg + 0)}° / 縦 ${signed(aimPitchDeg)}°`;
     }
 
+    const allClearEl = document.getElementById('all-clear');
+
     // 状態を切り替え、それに合わせて画面の表示を変える
     function setState(state) {
       game.state = state;
       document.body.dataset.state = state; // CSS でぼかし・操作ボタンの表示を切り替える
       titleScreenEl.classList.toggle('show', state === 'title');
       resultScreenEl.classList.toggle('show', state === 'result');
+      allClearEl.classList.toggle('show', state === 'allclear');
       guideLine.visible = state === 'playing';
       resetStick();
       look.pointerId = null;
@@ -1882,7 +1950,16 @@
       game.score += points;
       game.popped++;
       game.maxMulti = Math.max(game.maxMulti, hitIndex);
+      // クリアタイム：最後に割った瞬間のゲーム内の経過時間（金色の風船の動きと同じ時計）を 0.01 秒単位で
+      game.clearTime = Math.round(gameTime * 100) / 100;
       refreshHud();
+      // 全部割ったら「ALL CLEAR!」を出し、少し待ってからリザルトへ
+      if (game.popped >= balloons.length) {
+        allClearEl.querySelector('.time').textContent = formatTime(game.clearTime);
+        game.allClearTimer = ALL_CLEAR_SHOW_TIME;
+        playSound('beepStart');
+        setState('allclear');
+      }
     }
 
     // 1ゲーム分の状態を完全に最初に戻す（風船の配置・動きの時間・矢・プレイヤーの位置と向き）
@@ -1893,6 +1970,7 @@
       game.popped = 0;
       game.maxMulti = 0;
       game.lastSecond = TIME_LIMIT;
+      game.clearTime = null;
       // 飛んでいる矢と光の尾を消す（「×N HIT!」は出さない）
       for (const a of arrows) {
         scene.remove(a.mesh, a.trail.line);
@@ -1940,7 +2018,7 @@
     }
     countdownEl.addEventListener('animationend', () => countdownEl.classList.remove('show'));
 
-    // ゲーム終了：リザルト画面を出し、ベストスコアを更新する
+    // ゲーム終了：リザルト画面を出し、自分のベストを更新する
     function endGame() {
       // 時間切れのときに飛んでいた矢は消す（点数には入れない）
       for (const a of arrows) {
@@ -1949,17 +2027,20 @@
       }
       arrows.length = 0;
 
-      const isNewRecord = game.score > bestScore;
+      // スコアが高ければ、同点ならタイムが速ければ NEW RECORD!
+      const record = { score: game.score, time: game.clearTime };
+      const isNewRecord = isBetter(record, best);
       if (isNewRecord) {
-        bestScore = game.score;
-        saveBestScore(bestScore);
+        best = record;
+        saveBest(best);
       }
       document.getElementById('result-score').firstChild.textContent = game.score;
+      document.querySelector('#result-time span').textContent = formatTime(game.clearTime);
       document.getElementById('result-popped').textContent = `${game.popped}個`;
       document.getElementById('result-multi').textContent = `×${game.maxMulti}`;
-      document.getElementById('result-best').textContent = `${bestScore}点`;
+      document.getElementById('result-best').textContent = formatRecord(best);
       document.getElementById('new-record').classList.toggle('show', isNewRecord);
-      document.getElementById('title-best').textContent = bestScore;
+      refreshTitleBest();
       setState('result');
     }
 
@@ -1995,12 +2076,18 @@
         // 時間切れ、または矢を全部撃ち終えて最後の矢が消えたら終了
         if (game.timeLeft <= 0 || (game.arrowsLeft === 0 && arrows.length === 0)) endGame();
       }
+
+      // 全部割った直後：「ALL CLEAR!」を少し見せてからリザルトへ（時間は止まる）
+      if (game.state === 'allclear') {
+        game.allClearTimer -= dt;
+        if (game.allClearTimer <= 0) endGame();
+      }
     }
 
     document.getElementById('start-btn').addEventListener('click', startCountdown);
     document.getElementById('retry-btn').addEventListener('click', startCountdown);
     document.getElementById('to-title-btn').addEventListener('click', () => setState('title'));
-    document.getElementById('title-best').textContent = bestScore;
+    refreshTitleBest();
 
     // =========================================================
     // メインループ
