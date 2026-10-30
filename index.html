@@ -359,7 +359,7 @@
 </head>
 <body data-state="title" data-mode="normal">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v1.4</div>
+  <div id="version">v1.5</div>
   <div id="fps"></div>
   <div id="sound">🔊</div>
   <!-- ゲーム中の上部表示 -->
@@ -431,9 +431,10 @@
     const MOVE_REPEAT_INTERVAL = 0.12; // 押し続けているときに1刻み動く間隔 [秒]
 
     // ---- ゲームのルール ----
-    const ARROW_COUNT = 10;         // 1ゲームで撃てる矢の本数（満点ルートは5本）
+    const ARROW_COUNT = 10;         // 1ゲームで撃てる矢の本数
     const ALL_CLEAR_ARROW_BONUS = 2; // 全部割ったとき、残った矢1本につきもらえるボーナス点
-    const MAX_SCORE = 70;         // 理論上の最高点（ランキングなどで、ありえない点数を弾く上限に使う。求め方は solution.md）
+    const MAX_SCORE = 70;         // 理論上の最高点（ランキングなどで、ありえない点数を弾く上限に使う）
+    const DEBUG = false;            // true にすると、ブラウザのコンソールから確認用の関数（mirrorShooting.simulateShots）を呼べる
     const TIME_LIMIT = 60;          // 制限時間 [秒]
     const SCORE_NORMAL = 1;         // 止まっている風船の点数
     const SCORE_GOLD = 3;           // 金色の（動く）風船の点数
@@ -468,36 +469,23 @@
       { x: 3.5, y: 1.6, z: 15.6, yaw: 180 }, // 鏡5：奥の壁・左寄り
     ];
 
-    // ---- 風船の配置（全部で20個。満点ルートの軌道の上に並べてある） ----
+    // ---- 風船の配置（全部で20個） ----
     // 止まっている風船（16個）：[x, y, z]。y は風船の中心の高さ [m]。その場でふわふわ揺れる
+    // （色はこの並び順で BALLOON_COLORS から割り当てる）
     const STATIC_BALLOONS = [
-      [-3.77, 1.3, 4.79], [-4.56, 1.3, 12.46], [3.2, 1.3, 7.56], // ルート1の上
-      [-0.06, 2.55, 3.84], [1.92, 2.84, 9.91], [4.49, 0.6, 13.25], // ルート2の上
-      [3.48, 1.53, 4.98], [5.39, 1.85, 12.69], [-2.22, 2.35, 6.23], // ルート3の上
-      [5.64, 2.55, 3.96], [4.42, 2.89, 5.18], [-3.19, 2.12, 12.79], // ルート4の上
-      [-4.83, 1.58, 3.25], [-5.39, 1.71, 4.9], [-5.88, 2.23, 11.96], [-5.31, 2.35, 13.61], // ルート5の上
+      [-3.77, 1.3, 4.79], [-4.56, 1.3, 12.46], [3.2, 1.3, 7.56], [-0.06, 2.55, 3.84],
+      [1.92, 2.84, 9.91], [4.49, 0.6, 13.25], [3.48, 1.53, 4.98], [5.39, 1.85, 12.69],
+      [-2.22, 2.35, 6.23], [5.64, 2.55, 3.96], [4.42, 2.89, 5.18], [-3.19, 2.12, 12.79],
+      [-4.83, 1.58, 3.25], [-5.39, 1.71, 4.9], [-5.88, 2.23, 11.96], [-5.31, 2.35, 13.61],
     ];
     // 動く風船（4個、金色）：center は往復の中心、axis は動く向き、range は中心からの振れ幅 [m]、
     //   period は1往復の時間 [秒]、phase は動き出しのずれ [秒]。
     //   位置はゲーム開始からの経過時間だけで決まるので、毎回まったく同じ動きになる
     const MOVING_BALLOONS = [
-      { center: [1.29, 1.3, 8.36], axis: [0.82, 0.0, 0.57], range: 1.3, period: 6, phase: 4.08 }, // 横に往復（ルート1と交差）
-      { center: [2.44, 1.62, 11.52], axis: [0.0, 1.0, 0.0], range: 0.9, period: 6, phase: 0.57 }, // 縦に往復（ルート2と交差）
-      { center: [-1.85, 1.63, 8.06], axis: [0.6, 0.71, -0.37], range: 1.1, period: 6, phase: 2.06 }, // 斜めに往復（ルート3と交差）
-      { center: [-1.19, 2.45, 12.36], axis: [-0.71, 0.0, -0.71], range: 1.3, period: 6, phase: 4.42 }, // 横に往復（ルート4と交差）
-    ];
-
-    // ---- 満点ルート（確認用。ゲーム画面には出さない） ----
-    // position: 立ち位置 [m]（射的台の中央が 0、右が +）、yaw: 横の角度 [度]（右が +）、
-    // pitch: 縦の角度 [度]（上が +）、time: 撃つタイミング（ゲーム開始＝「スタート！」からの秒数）。
-    // 金色の風船は6秒ごとに軌道を通るので、撃てる時刻は他にもある（一覧と最速タイムは solution.md）
-    // 画面上部の「位置 / 横 / 縦」の表示と同じ単位。5本で20個すべて割れる（詳しくは solution.md）
-    const SOLUTION = [
-      { position: 0.0, yaw: 35, pitch: 0, time: 3 }, // ルート1：反射3回（鏡0→1→2）
-      { position: 1.5, yaw: -18, pitch: 15, time: 7 }, // ルート2：反射2回（鏡4→5）
-      { position: 0.0, yaw: -32, pitch: 2, time: 11 }, // ルート3：反射2回（鏡3→5）
-      { position: -3.5, yaw: -45, pitch: 11, time: 15 }, // ルート4：反射2回（鏡2→4）
-      { position: 3.5, yaw: 19, pitch: 4, time: 19 }, // ルート5：反射1回（鏡0）
+      { center: [1.29, 1.3, 8.36], axis: [0.82, 0.0, 0.57], range: 1.3, period: 6, phase: 4.08 }, // 横に往復
+      { center: [2.44, 1.62, 11.52], axis: [0.0, 1.0, 0.0], range: 0.9, period: 6, phase: 0.57 }, // 縦に往復
+      { center: [-1.85, 1.63, 8.06], axis: [0.6, 0.71, -0.37], range: 1.1, period: 6, phase: 2.06 }, // 斜めに往復
+      { center: [-1.19, 2.45, 12.36], axis: [-0.71, 0.0, -0.71], range: 1.3, period: 6, phase: 4.42 }, // 横に往復
     ];
 
     // ---- 見た目：風船 ----
@@ -1623,7 +1611,7 @@
     // シミュレーション（画面には出さない確認用）
     // 撃ち方の一覧を、実際のゲームと同じ計算（shotFrom・advanceTip・balloonsOnSegments）で
     // 1/120秒刻みに進めて、どの風船が割れるかを調べる。
-    // shots: [{ position, yaw, pitch, time }]（SOLUTION と同じ表示の単位）
+    // shots: [{ position, yaw, pitch, time }]（画面上部の「位置 / 横 / 縦」と同じ単位。time は「スタート！」からの秒数）
     // 戻り値：{ popped: 割れた数, score: 点数（全部割れたら残り矢ボーナス込み）, arrowBonus: 残り矢ボーナス, clearTime: 最後に割れた時刻,
     //          shots: [{ popped: 割れた風船の番号（順番どおり）, popTimes: 割れた時刻, reflections, points }] }
     // =========================================================
@@ -2044,7 +2032,7 @@
     const hudScoreEl = document.getElementById('hud-score');
     const hudAimEl = document.getElementById('hud-aim');
 
-    // 上部の「位置 / 横 / 縦」を更新する（右が +、上が +。SOLUTION と同じ単位）
+    // 上部の「位置 / 横 / 縦」を更新する（右が +、上が +）
     const signed = (v, digits = 0) => `${v > 0 ? '+' : ''}${(v === 0 ? 0 : v).toFixed(digits)}`;
     function refreshAimHud() {
       hudAimEl.textContent = `位置 ${signed(-player.slotX + 0, 1)}m / 横 ${signed(-aimYawDeg + 0, 1)}° / 縦 ${signed(aimPitchDeg + 0, 1)}°`;
@@ -2277,8 +2265,9 @@
     advanceBalloonTime(0);
     setAim(0, 0);
     setState('title');
-    // 確認用：ブラウザのコンソールから simulateShots(SOLUTION) で満点ルートを試せる（画面には出さない）
-    window.mirrorShooting = { simulateShots, SOLUTION };
+    // 確認用：DEBUG が true のときだけ、ブラウザのコンソールから simulateShots を呼べるようにする
+    // （例：mirrorShooting.simulateShots([{ position: 0, yaw: 10, pitch: 0, time: 3 }])）
+    if (DEBUG) window.mirrorShooting = { simulateShots };
 
     // FPS 表示（0.5秒ごとに、その間の平均を出す）
     const fpsEl = document.getElementById('fps');
