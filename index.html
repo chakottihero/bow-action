@@ -213,6 +213,41 @@
     }
     body[data-state="title"] #hud-aim, body[data-state="result"] #hud-aim { display: none; }
 
+    /* ===== 練習モードの表示とボタン（左上） ===== */
+    #practice-bar {
+      position: fixed;
+      left: calc(10px + env(safe-area-inset-left));
+      top: calc(8px + env(safe-area-inset-top));
+      display: none;
+      align-items: center;
+      gap: 8px;
+      z-index: 4;
+    }
+    body[data-mode="practice"][data-state="playing"] #practice-bar,
+    body[data-mode="practice"][data-state="countdown"] #practice-bar { display: flex; }
+    #practice-bar .label {
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: rgba(60, 170, 255, 0.85);
+      color: #fff;
+      font-size: 13px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+    #practice-bar button {
+      min-width: 40px;
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: 16px;
+      background: rgba(0, 0, 0, 0.45);
+      color: #fff;
+      font-size: 15px;
+      font-weight: bold;
+      cursor: pointer;
+      touch-action: none;
+    }
+
     /* ===== タイトル画面・リザルト画面（射的場の上に重ねる） ===== */
     .screen {
       position: fixed;
@@ -322,15 +357,15 @@
     }
   </style>
 </head>
-<body data-state="title">
+<body data-state="title" data-mode="normal">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v1.3</div>
+  <div id="version">v1.4</div>
   <div id="fps"></div>
   <div id="sound">🔊</div>
   <!-- ゲーム中の上部表示 -->
   <div id="hud-top">
     <span><span class="label">矢</span><span id="hud-arrows">10</span></span>
-    <span><span class="label">残り</span><span id="hud-time">60</span></span>
+    <span><span class="label" id="hud-time-label">残り</span><span id="hud-time">60</span></span>
     <span><span class="label">スコア</span><span id="hud-score">0</span></span>
   </div>
   <div id="hud-aim"></div>
@@ -339,7 +374,10 @@
   <!-- タイトル画面 -->
   <div id="title-screen" class="screen">
     <h1>鏡射的</h1>
-    <button id="start-btn" class="btn">スタート</button>
+    <div class="buttons">
+      <button id="start-btn" class="btn">本番</button>
+      <button id="practice-btn" class="btn sub">練習</button>
+    </div>
     <div class="best">自分のベスト：<span id="title-best">まだ記録なし</span></div>
     <div class="help">移動: スティック左右 / A・D（0.5m刻み） ・ 狙い: 画面をドラッグ（0.2度刻み） ・ 射撃: SHOOT / 右クリック / F<br>
       矢は10本。鏡で反射させて、1本でまとめて割るとボーナス！ 全部割ると残った矢もボーナスに。全部割れる撃ち方が必ずある。</div>
@@ -367,6 +405,12 @@
   <div id="shoot">SHOOT</div>
   <div id="crosshair"></div>
   <div id="hit-popup"></div>
+  <!-- 練習モード中だけ出る：表示と「↻」（風船を全部元に戻す）・「終了」（タイトルへ） -->
+  <div id="practice-bar">
+    <span class="label">練習モード</span>
+    <button id="practice-reset" title="風船を全部元に戻す">↻</button>
+    <button id="practice-exit">終了</button>
+  </div>
 
   <!-- Three.js を CDN から ES Module として読み込む -->
   <script type="importmap">
@@ -507,9 +551,13 @@
     const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
     const ARROW_LIFETIME = 5.0;     // 矢が消えるまでの時間 [秒]（重力なしでまっすぐ飛び続ける）
     const ARROW_MAX_REFLECTIONS = 5; // 1本の矢が鏡で反射できる最大回数（これを超えて鏡に当たると消える）
-    const GUIDE_REFLECTIONS = 1;    // 撃つ前の予測線で見せる反射の回数（その先は反射直後の短い線だけ）
+    const GUIDE_REFLECTIONS = 2;    // 本番：撃つ前の予測線で見せる反射の回数（その先は反射直後の短い線だけ）
+    const GUIDE_REFLECTIONS_PRACTICE = ARROW_MAX_REFLECTIONS; // 練習：見せる反射の回数（矢が反射できる最後まで全部）
     const GUIDE_AFTER_LENGTH = 1.0; // 最後に見せる反射の直後に描く短い線の長さ [m]
-    const GUIDE_OPACITY = 0.35;     // 予測線の濃さ（0〜1）
+    const GUIDE_OPACITY = 0.55;     // 予測線の濃さ（0〜1）
+    const GUIDE_COLORS = [          // 予測線の色。反射するたびに次の色へ（1本目は白、反射後は水色→黄色→…）
+      0xffffff, 0x6fe3ff, 0xffe14d, 0xff8ad8, 0x8dff8a, 0xffa040,
+    ];
     const TRAIL_OPACITY = 0.7;      // 飛んでいる矢の光の尾の濃さ（0〜1）
     const TRAIL_FADE_TIME = 1.0;    // 矢が消えてから光の尾が消えるまでの時間 [秒]
     const ARROW_HEIGHT = 1.3;       // 矢を撃ち出す高さ（足元基準。胸の高さ）
@@ -1294,9 +1342,10 @@
 
     // 矢を1本撃つ（ゲーム中でない・矢が残っていない・クールダウン中なら何もしない）
     function shoot() {
-      if (game.state !== 'playing' || game.arrowsLeft <= 0 || shootCooldown > 0) return;
+      const practice = game.mode === 'practice';
+      if (game.state !== 'playing' || (!practice && game.arrowsLeft <= 0) || shootCooldown > 0) return;
       shootCooldown = SHOOT_COOLDOWN;
-      game.arrowsLeft--;
+      if (!practice) game.arrowsLeft--; // 練習モードは矢が無制限
       refreshHud();
       playSound('shoot');
 
@@ -1626,22 +1675,41 @@
 
     // =========================================================
     // 撃つ前の予測線
-    // 照準の方向へ撃ったときの軌道を、GUIDE_REFLECTIONS 回目の反射までと、
-    // その反射直後の短い線（GUIDE_AFTER_LENGTH）だけ薄く表示する。
+    // 照準の方向へ撃ったときの軌道を、矢と同じ計算で反射させながら表示する。
+    // 見せる反射の回数は本番 GUIDE_REFLECTIONS、練習 GUIDE_REFLECTIONS_PRACTICE。
+    // 反射するたびに線の色を変え（GUIDE_COLORS）、反射点に小さな光る点を出す。
     // 風船は貫通するので無視し、床・射的台・壁・鏡の木の枠・射的場の外で線を止める。
+    // 計算は立ち位置か狙いの角度が変わったときだけ行う（毎フレームは計算しない）。
     // =========================================================
-    const GUIDE_MAX_POINTS = GUIDE_REFLECTIONS + 2;
-    const guidePositions = new Float32Array(GUIDE_MAX_POINTS * 3);
+    const GUIDE_MAX_SEGMENTS = ARROW_MAX_REFLECTIONS + 1;
+    const guidePositions = new Float32Array(GUIDE_MAX_SEGMENTS * 2 * 3); // 線分ごとに始点・終点
+    const guideColors = new Float32Array(GUIDE_MAX_SEGMENTS * 2 * 3);
     const guideGeometry = new THREE.BufferGeometry();
     guideGeometry.setAttribute('position', new THREE.BufferAttribute(guidePositions, 3));
-    const guideLine = new THREE.Line(guideGeometry, new THREE.LineBasicMaterial({
-      color: 0xffffff,
+    guideGeometry.setAttribute('color', new THREE.BufferAttribute(guideColors, 3));
+    const guideLine = new THREE.LineSegments(guideGeometry, new THREE.LineBasicMaterial({
+      vertexColors: true,
       transparent: true,
       opacity: GUIDE_OPACITY,
       depthWrite: false,
     }));
     guideLine.frustumCulled = false;
     scene.add(guideLine);
+
+    // 反射点の小さな光る点（使い回す）
+    const guideDotGeometry = new THREE.SphereGeometry(0.07, 10, 8);
+    const guideDots = Array.from({ length: ARROW_MAX_REFLECTIONS }, () => {
+      const dot = new THREE.Mesh(guideDotGeometry, new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }));
+      dot.visible = false;
+      scene.add(dot);
+      return dot;
+    });
+    const guideColor = (i) => new THREE.Color(GUIDE_COLORS[i % GUIDE_COLORS.length]);
 
     // レイが射的場の外へ出るまでの距離（stageBox の出口）
     function distanceToStageExit(origin, dir) {
@@ -1655,47 +1723,70 @@
       return Math.max(0, tExit);
     }
 
-    // 予測線の頂点を計算して書き込む。shot は shotFrom() の結果
-    // 戻り値：最初に当たる地点（照準の表示に使う）と、そこまでの間に風船があるか
+    // 予測線の頂点を計算して書き込む。shot は shotFrom() の結果、maxShown は見せる反射の回数
+    // 戻り値：最初にまっすぐ飛ぶ区間（照準の表示と、照準を赤くする判定に使う）
     const guideHitLocal = new THREE.Vector3();
-    function updateGuide(shot) {
+    function buildGuide(shot, maxShown) {
       const pos = shot.tip.clone();
       const dir = shot.dir.clone();
-      let count = 0;
-      const push = (p) => { guidePositions.set([p.x, p.y, p.z], count * 3); count++; };
-      push(pos);
+      let segCount = 0;
+      const pushSegment = (from, to, colorIndex) => {
+        const c = guideColor(colorIndex);
+        guidePositions.set([from.x, from.y, from.z, to.x, to.y, to.z], segCount * 6);
+        guideColors.set([c.r, c.g, c.b, c.r, c.g, c.b], segCount * 6);
+        segCount++;
+      };
+      guideDots.forEach((d) => { d.visible = false; });
+      let firstEnd = null;
 
       for (let reflections = 0; ; reflections++) {
         const maxDist = distanceToStageExit(pos, dir);
         const hit = raycastColliders(pos, dir, 1e-4, maxDist);
-        if (!hit) { push(pos.addScaledVector(dir, maxDist)); break; } // マップの外まで何もない
-        pos.addScaledVector(dir, hit.t);
-        push(pos);
-        if (!hit.mirror) break; // 床・射的台・壁に当たったらそこで終わり
+        const start = pos.clone();
+        pos.addScaledVector(dir, hit ? hit.t : maxDist);
+        pushSegment(start, pos, reflections);
+        if (!firstEnd) firstEnd = pos.clone();
+        if (!hit || !hit.mirror) break; // 床・射的台・壁、または射的場の外で終わり
 
-        // 鏡の木の枠なら矢はそこで消えるので、線もそこで終わり
+        // 鏡の木の枠なら矢はそこで消える。反射回数の上限を超える鏡でも矢は消える
         toMirrorLocal(hit.mirror, pos, guideHitLocal);
-        if (!isMirrorFace(guideHitLocal)) break;
-        if (reflections >= GUIDE_REFLECTIONS) break; // 見せる反射回数を使い切ったら終わり
+        if (!isMirrorFace(guideHitLocal) || reflections >= ARROW_MAX_REFLECTIONS) break;
+
+        // 反射点に光る点（反射後の線と同じ色）
+        const dot = guideDots[reflections];
+        dot.position.copy(pos);
+        dot.material.color.copy(guideColor(reflections + 1));
+        dot.visible = true;
 
         // 反射させる
         const n = hit.mirror.normal;
         dir.addScaledVector(n, -2 * dir.dot(n)).normalize();
-        if (reflections + 1 >= GUIDE_REFLECTIONS) {
-          // 最後に見せる反射：その直後の短い線だけ描く（途中で何かに当たればそこまで）
+        if (reflections + 1 >= maxShown && maxShown < ARROW_MAX_REFLECTIONS) {
+          // 見せる反射回数を使い切った：その直後の短い線だけ描く（途中で何かに当たればそこまで）
           const end = raycastColliders(pos, dir, 1e-4, GUIDE_AFTER_LENGTH);
-          push(pos.clone().addScaledVector(dir, end ? end.t : GUIDE_AFTER_LENGTH));
+          pushSegment(pos, pos.clone().addScaledVector(dir, end ? end.t : GUIDE_AFTER_LENGTH), reflections + 1);
           break;
         }
       }
-      guideGeometry.setDrawRange(0, count);
+      guideGeometry.setDrawRange(0, segCount * 2);
       guideGeometry.attributes.position.needsUpdate = true;
+      guideGeometry.attributes.color.needsUpdate = true;
+      return { firstHit: firstEnd, firstLength: firstEnd.distanceTo(shot.tip) };
+    }
 
-      // 最初にまっすぐ飛ぶ区間（発射 → 最初に当たる地点）に風船があれば、照準を赤くする
-      const firstHit = new THREE.Vector3().fromArray(guidePositions, 3);
-      const firstLength = firstHit.distanceTo(shot.tip);
-      const onTarget = balloons.some((b) => b.state === 'alive' && rayBalloon(shot.tip, shot.dir, b.center, 0, firstLength) !== null);
-      return { firstHit, onTarget };
+    // 立ち位置か狙いの角度（または見せる反射回数）が変わったときだけ予測線を作り直す
+    let guideKey = '';
+    let guideFirst = null;
+    function updateGuide(shot) {
+      const maxShown = game.mode === 'practice' ? GUIDE_REFLECTIONS_PRACTICE : GUIDE_REFLECTIONS;
+      const key = `${player.slotX}|${aimYawDeg}|${aimPitchDeg}|${maxShown}`;
+      if (key !== guideKey) {
+        guideKey = key;
+        guideFirst = buildGuide(shot, maxShown);
+      }
+      // 最初にまっすぐ飛ぶ区間に風船があれば照準を赤くする（風船は動くので、これは毎フレーム見る）
+      const onTarget = balloons.some((b) => b.state === 'alive' && rayBalloon(shot.tip, shot.dir, b.center, 0, guideFirst.firstLength) !== null);
+      return { firstHit: guideFirst.firstHit, onTarget };
     }
 
     // 照準（＋マーク）を、矢が最初に当たる地点の画面上の位置に置く
@@ -1901,6 +1992,7 @@
     // =========================================================
     const game = {
       state: 'title',     // 'title' / 'countdown' / 'playing' / 'allclear'（全部割った直後） / 'result'
+      mode: 'normal',     // 'normal'（本番：矢と時間に制限があり、記録が残る） / 'practice'（練習：無制限、記録は残らない）
       arrowsLeft: ARROW_COUNT,
       timeLeft: TIME_LIMIT,
       score: 0,
@@ -1913,6 +2005,7 @@
       arrowBonus: 0,      // 全部割ったときの残り矢ボーナス（全部割れなければ 0）
       allClearTimer: 0,   // 「ALL CLEAR!」を表示している残り時間
     };
+    const hudTimeLabelEl = () => document.getElementById('hud-time-label');
 
     // 自分のベスト { score, time } の読み書き（保存できない環境でも動くよう try で囲む）
     // 以前のバージョンはスコアの数字だけを保存していたので、その場合はタイムなしとして読む
@@ -1967,15 +2060,20 @@
       resultScreenEl.classList.toggle('show', state === 'result');
       allClearEl.classList.toggle('show', state === 'allclear');
       guideLine.visible = state === 'playing';
+      if (state !== 'playing') guideDots.forEach((d) => { d.visible = false; });
+      guideKey = ''; // 次に表示するときは作り直す
       resetStick();
       look.pointerId = null;
     }
 
     // 上部の表示（残りの矢・残り時間・スコア）を更新する
+    // 練習モードは矢が「∞」、時間は「経過」（スタートか ↻ からの秒数。金色の風船の動きと同じ時計）
     function refreshHud() {
-      hudArrowsEl.textContent = game.arrowsLeft;
-      hudTimeEl.textContent = Math.ceil(game.timeLeft);
-      hudTimeEl.classList.toggle('warning', game.timeLeft <= WARNING_TIME);
+      const practice = game.mode === 'practice';
+      hudArrowsEl.textContent = practice ? '∞' : game.arrowsLeft;
+      hudTimeLabelEl().textContent = practice ? '経過' : '残り';
+      hudTimeEl.textContent = practice ? gameTime.toFixed(1) : Math.ceil(game.timeLeft);
+      hudTimeEl.classList.toggle('warning', !practice && game.timeLeft <= WARNING_TIME);
       hudScoreEl.textContent = game.score;
     }
 
@@ -1988,16 +2086,23 @@
       // クリアタイム：最後に割った瞬間のゲーム内の経過時間（金色の風船の動きと同じ時計）を 0.01 秒単位で
       game.clearTime = Math.round(gameTime * 100) / 100;
       refreshHud();
-      // 全部割ったら、残った矢1本につきボーナス。「ALL CLEAR!」を出し、少し待ってからリザルトへ
-      if (game.popped >= balloons.length) {
-        game.arrowBonus = game.arrowsLeft * ALL_CLEAR_ARROW_BONUS;
-        game.score += game.arrowBonus;
-        refreshHud();
+      if (!balloons.every((b) => b.state === 'popped')) return;
+      // 練習モード：「ALL CLEAR!」を少し見せるだけで続ける（記録は残さない。風船は少し待つと元に戻る）
+      if (game.mode === 'practice') {
         allClearEl.querySelector('.time').textContent = formatTime(game.clearTime);
+        allClearEl.classList.add('show');
         game.allClearTimer = ALL_CLEAR_SHOW_TIME;
         playSound('beepStart');
-        setState('allclear');
+        return;
       }
+      // 本番：残った矢1本につきボーナス。「ALL CLEAR!」を出し、少し待ってからリザルトへ
+      game.arrowBonus = game.arrowsLeft * ALL_CLEAR_ARROW_BONUS;
+      game.score += game.arrowBonus;
+      refreshHud();
+      allClearEl.querySelector('.time').textContent = formatTime(game.clearTime);
+      game.allClearTimer = ALL_CLEAR_SHOW_TIME;
+      playSound('beepStart');
+      setState('allclear');
     }
 
     // 1ゲーム分の状態を完全に最初に戻す（風船の配置・動きの時間・矢・プレイヤーの位置と向き）
@@ -2040,8 +2145,10 @@
       refreshHud();
     }
 
-    // スタート：カウントダウンを始める
-    function startCountdown() {
+    // スタート：モード（'normal' 本番 / 'practice' 練習）を決めてカウントダウンを始める
+    function startCountdown(mode = game.mode) {
+      game.mode = mode;
+      document.body.dataset.mode = mode; // CSS で練習モードの表示を切り替える
       resetRound();
       game.countdownTime = 0;
       game.countdownStep = -1;
@@ -2106,6 +2213,16 @@
         return;
       }
 
+      // 練習モード：制限時間も矢の数の制限もなく、終わらない。「ALL CLEAR!」は少ししたら消す
+      if (game.state === 'playing' && game.mode === 'practice') {
+        refreshHud();
+        if (game.allClearTimer > 0) {
+          game.allClearTimer -= dt;
+          if (game.allClearTimer <= 0) allClearEl.classList.remove('show');
+        }
+        return;
+      }
+
       if (game.state === 'playing') {
         game.timeLeft = Math.max(0, game.timeLeft - dt);
         // 残り時間わずか：秒が変わるたびに「ピッ」
@@ -2126,8 +2243,27 @@
       }
     }
 
-    document.getElementById('start-btn').addEventListener('click', startCountdown);
-    document.getElementById('retry-btn').addEventListener('click', startCountdown);
+    document.getElementById('start-btn').addEventListener('click', () => startCountdown('normal'));
+    document.getElementById('practice-btn').addEventListener('click', () => startCountdown('practice'));
+    document.getElementById('retry-btn').addEventListener('click', () => startCountdown('normal'));
+
+    // 練習モード：「↻」で風船を全部元に戻し、金色の風船の動きと経過時間も最初からにする
+    // （立ち位置と狙いはそのまま。同じ撃ち方をすぐ試し直せるように）
+    function resetPracticeBalloons() {
+      if (game.mode !== 'practice' || game.state !== 'playing') return;
+      const slotX = player.slotX, yaw = aimYawDeg, pitch = aimPitchDeg;
+      resetRound();
+      player.slotX = slotX;
+      setAim(yaw, pitch);
+      updateCamera(0, true);
+      game.allClearTimer = 0;
+      allClearEl.classList.remove('show');
+    }
+    document.getElementById('practice-reset').addEventListener('click', resetPracticeBalloons);
+    document.getElementById('practice-exit').addEventListener('click', () => {
+      allClearEl.classList.remove('show');
+      setState('title');
+    });
     document.getElementById('to-title-btn').addEventListener('click', () => setState('title'));
     refreshTitleBest();
 
