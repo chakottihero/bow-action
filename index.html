@@ -141,6 +141,18 @@
       cursor: pointer;
     }
 
+    /* FPS 表示（右上、音のボタンの下）：なめらかさの確認用。SHOW_FPS で消せる */
+    #fps {
+      position: fixed;
+      right: calc(10px + env(safe-area-inset-right));
+      top: calc(70px + env(safe-area-inset-top));
+      color: rgba(255, 255, 255, 0.75);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+    }
+
     /* バージョン表示（右上）：どのバージョンが読み込まれているか確認する用 */
     #version {
       position: fixed;
@@ -312,7 +324,8 @@
 </head>
 <body data-state="title">
   <!-- バージョン番号：コミットするたびに数字を上げること -->
-  <div id="version">v1.2</div>
+  <div id="version">v1.3</div>
+  <div id="fps"></div>
   <div id="sound">🔊</div>
   <!-- ゲーム中の上部表示 -->
   <div id="hud-top">
@@ -328,8 +341,8 @@
     <h1>鏡射的</h1>
     <button id="start-btn" class="btn">スタート</button>
     <div class="best">自分のベスト：<span id="title-best">まだ記録なし</span></div>
-    <div class="help">移動: スティック左右 / A・D（0.5m刻み） ・ 狙い: 画面をドラッグ（1度刻み） ・ 射撃: SHOOT / 右クリック / F<br>
-      矢は6本。鏡で反射させて、1本でまとめて割るとボーナス！ 全部割れる撃ち方が必ずある。</div>
+    <div class="help">移動: スティック左右 / A・D（0.5m刻み） ・ 狙い: 画面をドラッグ（0.2度刻み） ・ 射撃: SHOOT / 右クリック / F<br>
+      矢は10本。鏡で反射させて、1本でまとめて割るとボーナス！ 全部割ると残った矢もボーナスに。全部割れる撃ち方が必ずある。</div>
   </div>
   <!-- リザルト画面 -->
   <div id="result-screen" class="screen">
@@ -342,6 +355,7 @@
     <dl class="result-rows">
       <dt>割った数</dt><dd id="result-popped">0個</dd>
       <dt>最大同時割り</dt><dd id="result-multi">×0</dd>
+      <dt class="arrow-bonus">残り矢ボーナス</dt><dd class="arrow-bonus" id="result-arrow-bonus">+0</dd>
       <dt>自分のベスト</dt><dd id="result-best">0点</dd>
     </dl>
     <div class="buttons">
@@ -367,12 +381,15 @@
     // =========================================================
     const PLAYER_RADIUS = 0.5;      // 主人公（カプセル）の半径
     const PLAYER_HEIGHT = 2.0;      // 主人公の全高（足元〜頭）
-    const MOVE_STEP = 0.5;          // 立ち位置の刻み [m]（射的台の上をこの間隔でカチッと止まる）
+    const MOVE_STEP = 0.5;          // 立ち位置の刻み [m]（射的台の上をこの間隔で止まる）
+    const MOVE_SLIDE_SPEED = 12;    // 次の立ち位置へスーッとスライドする速さ（大きいほど速く着く）
     const MOVE_REPEAT_DELAY = 0.3;  // 移動キー・スティックを押し続けたとき、連続で動き始めるまでの時間 [秒]
     const MOVE_REPEAT_INTERVAL = 0.12; // 押し続けているときに1刻み動く間隔 [秒]
 
     // ---- ゲームのルール ----
-    const ARROW_COUNT = 6;          // 1ゲームで撃てる矢の本数（満点ルートは5本。1本は予備）
+    const ARROW_COUNT = 10;         // 1ゲームで撃てる矢の本数（満点ルートは5本）
+    const ALL_CLEAR_ARROW_BONUS = 2; // 全部割ったとき、残った矢1本につきもらえるボーナス点
+    const MAX_SCORE = 70;         // 理論上の最高点（ランキングなどで、ありえない点数を弾く上限に使う。求め方は solution.md）
     const TIME_LIMIT = 60;          // 制限時間 [秒]
     const SCORE_NORMAL = 1;         // 止まっている風船の点数
     const SCORE_GOLD = 3;           // 金色の（動く）風船の点数
@@ -469,19 +486,24 @@
     const CURTAIN_STRIPE_WIDTH = 0.6; // 紅白幕のしま1本の幅 [m]
     const LANTERN_COLOR = 0xff3a1e; // 提灯の色（自分で光る）
     const LANTERNS_PER_WALL = 8;    // 壁1面あたりの提灯の数（左・右・奥の3面に並べる）
-    const LANTERN_LIGHT_COUNT = 4;  // 実際に周りを照らすライトの数（スマホの負荷を抑えるため少なめ）
-    const LANTERN_LIGHT_INTENSITY = 15; // 提灯のライトの明るさ
+    const LANTERN_LIGHT_COUNT = 2;  // 実際に周りを照らすライトの数（スマホの負荷を抑えるため少なめ）
+    const LANTERN_LIGHT_INTENSITY = 26; // 提灯のライトの明るさ（数を減らしたぶん少し明るく）
 
     // ---- カメラ・狙い ----
     const CAMERA_DISTANCE = 3.6;    // カメラをプレイヤーのどれだけ後ろに置くか [m]
     const CAMERA_HEIGHT = 2.5;      // カメラの高さ（足元基準）[m]。頭より少し上から見下ろして、プレイヤーで画面が隠れないように
     const CAMERA_SHOULDER = 1.0;    // カメラを右にずらす量 [m]（肩越しに見て、照準がプレイヤーに隠れないように）
-    const CAMERA_SMOOTH = 10.0;     // カメラがプレイヤーの左右移動に追従する滑らかさ（大きいほどキビキビ）
+    const CAMERA_AIM_SMOOTH = 18.0; // カメラの向きが、刻んだ狙いの角度へ追いつく速さ（大きいほどキビキビ。矢は刻んだ角度ちょうどに飛ぶ）
     const AIM_YAW_LIMIT = 60;       // 狙いを左右に動かせる範囲 [度]（正面から ±）
     const AIM_PITCH_LIMIT = 30;     // 狙いを上下に動かせる範囲 [度]（水平から ±）
-    const CAMERA_YAW_SENSITIVITY = 0.25;    // 横ドラッグ1pxあたりの左右の回転量 [度]（角度は1度刻みに丸める）
-    const CAMERA_PITCH_SENSITIVITY = 0.25;  // 縦ドラッグ1pxあたりの上下の回転量 [度]
+    const AIM_STEP = 0.2;           // 狙いの角度の刻み [度]（横・縦とも）
+    const CAMERA_YAW_SENSITIVITY = 0.12;    // 横ドラッグ1pxあたりの左右の回転量 [度]（角度は AIM_STEP 刻みに丸める）
+    const CAMERA_PITCH_SENSITIVITY = 0.12;  // 縦ドラッグ1pxあたりの上下の回転量 [度]
     const CAMERA_INVERT_Y = false;  // true にすると縦ドラッグの上下を反転
+    // ---- 描画の重さ（スマホで重いときに下げる） ----
+    const MAX_PIXEL_RATIO = 2;      // 描画の解像度（pixelRatio）の上限
+    const SHADOW_MAP_SIZE = 512;    // 影の解像度
+    const SHOW_FPS = true;          // 右上に FPS を表示する（確認用。false で消す）
     const ARROW_SPEED = 30.0;       // 矢の速さ [m/s]
     const ARROW_LIFETIME = 5.0;     // 矢が消えるまでの時間 [秒]（重力なしでまっすぐ飛び続ける）
     const ARROW_MAX_REFLECTIONS = 5; // 1本の矢が鏡で反射できる最大回数（これを超えて鏡に当たると消える）
@@ -707,7 +729,7 @@
     // =========================================================
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     // スマホの高解像度画面で重くなりすぎないよう、ピクセル比は最大2に制限
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
     document.body.appendChild(renderer.domElement);
@@ -723,7 +745,7 @@
     const moon = new THREE.DirectionalLight(0xaabbff, 0.7);
     moon.position.set(10, 20, 8);
     moon.castShadow = true;
-    moon.shadow.mapSize.set(1024, 1024);
+    moon.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
     moon.shadow.camera.left = -30;
     moon.shadow.camera.right = 30;
     moon.shadow.camera.top = 30;
@@ -895,7 +917,7 @@
         .addScaledVector(alongWall(side), (around % 1 - 0.5) * side.length)
         .addScaledVector(side.inward, 2.5); // 壁に近すぎると幕が白飛びするので少し内側に置く
       pos.y = LANTERN_Y;
-      const light = new THREE.PointLight(0xff7a40, LANTERN_LIGHT_INTENSITY, 30, 1.4);
+      const light = new THREE.PointLight(0xff7a40, LANTERN_LIGHT_INTENSITY, 40, 1.4);
       light.position.copy(pos);
       scene.add(light);
     }
@@ -1553,7 +1575,7 @@
     // 撃ち方の一覧を、実際のゲームと同じ計算（shotFrom・advanceTip・balloonsOnSegments）で
     // 1/120秒刻みに進めて、どの風船が割れるかを調べる。
     // shots: [{ position, yaw, pitch, time }]（SOLUTION と同じ表示の単位）
-    // 戻り値：{ popped: 割れた数, score: 点数, clearTime: 最後に割れた時刻,
+    // 戻り値：{ popped: 割れた数, score: 点数（全部割れたら残り矢ボーナス込み）, arrowBonus: 残り矢ボーナス, clearTime: 最後に割れた時刻,
     //          shots: [{ popped: 割れた風船の番号（順番どおり）, popTimes: 割れた時刻, reflections, points }] }
     // =========================================================
     function simulateShots(shots, step = 1 / 120) {
@@ -1561,6 +1583,7 @@
       const centers = balloons.map(() => new THREE.Vector3());
       const results = shots.map(() => ({ popped: [], popTimes: [], reflections: 0, points: 0 }));
       let clearTime = null;
+      let fired = 0, arrowBonus = 0;
       const pending = shots.map((s, i) => ({ ...s, i })).sort((a, b) => a.time - b.time);
       const flying = [];
       let score = 0;
@@ -1568,6 +1591,7 @@
         // 撃つ時刻になった矢を撃つ（実際のゲームと同じく、撃った次の刻みから進む）
         while (pending.length > 0 && pending[0].time <= t + 1e-9) {
           const s = pending.shift();
+          fired++;
           const shot = shotFrom(-s.position, -s.yaw, s.pitch); // 表示の単位（右が+）→ 内部の座標（左が+）
           flying.push({ i: s.i, tip: shot.tip, dir: shot.dir, reflections: 0, life: ARROW_LIFETIME });
         }
@@ -1587,12 +1611,17 @@
             const points = (balloons[index].motion ? SCORE_GOLD : SCORE_NORMAL) + (r.popped.length - 1) * MULTI_HIT_BONUS;
             r.points += points;
             score += points;
+            // 全部割れた瞬間に、残っている矢の数だけボーナス（実際のゲームと同じ）
+            if (alive.every((v) => !v)) {
+              arrowBonus = (ARROW_COUNT - fired) * ALL_CLEAR_ARROW_BONUS;
+              score += arrowBonus;
+            }
           }
           r.reflections = a.reflections;
           if (move.stopped || tipIsBlocked(a.tip) || a.life <= 0) flying.splice(k, 1);
         }
       }
-      return { popped: alive.filter((v) => !v).length, score, clearTime, shots: results };
+      return { popped: alive.filter((v) => !v).length, score, arrowBonus, clearTime, shots: results };
     }
 
     // =========================================================
@@ -1742,25 +1771,28 @@
     // 入力（狙いのドラッグ）
     // スティックとSHOOTボタン以外（＝キャンバス）をドラッグすると狙う向きが変わる。
     // 左右は正面から ±AIM_YAW_LIMIT 度、上下は水平から ±AIM_PITCH_LIMIT 度まで。
-    // ドラッグの量はそのまま積み上げ、実際の角度は1度刻みに丸めてカチッと止める。
+    // ドラッグの量はそのまま積み上げ、実際の角度は AIM_STEP（0.2度）刻みに丸める。
+    // カメラはその角度へなめらかに追いつき、矢は丸めた角度ちょうどに飛ぶ。
     // スティックとは別の指（pointerId）として扱うので、左手移動＋右手狙いが同時にできる。
     // PCではマウスの左ドラッグで同じように動かせる。
     // =========================================================
     let rawYawDeg = 0, rawPitchDeg = 0;    // ドラッグで動かしている途中の角度（丸める前）
-    let aimYawDeg = 0, aimPitchDeg = 0;    // 実際の狙いの角度（1度刻み）。横は + で左、縦は + で上
-    let cameraYaw = 0;    // カメラの左右の角度 [ラジアン]（aimYawDeg と同じ向き）
-    let cameraPitch = 0;  // カメラの上下の角度 [ラジアン]
+    let aimYawDeg = 0, aimPitchDeg = 0;    // 実際の狙いの角度（AIM_STEP 刻み）。横は + で左、縦は + で上
+    let cameraYaw = 0;    // カメラの左右の角度 [ラジアン]（aimYawDeg へなめらかに追いつく）
+    let cameraPitch = 0;  // カメラの上下の角度 [ラジアン]（aimPitchDeg へなめらかに追いつく）
     const look = { pointerId: null, lastX: 0, lastY: 0 };
     const canvasEl = renderer.domElement;
 
-    // 狙いの角度を設定する（範囲内に収め、1度刻みに丸める）
+    // 角度を AIM_STEP 刻みに丸める。小数の誤差（35.00000000000001 など）が残らないよう、
+    // 最後に小数6桁で丸め直して、同じ角度がいつもまったく同じ数値になるようにする
+    const snapAngle = (deg) => Number((Math.round(deg / AIM_STEP) * AIM_STEP).toFixed(6));
+
+    // 狙いの角度を設定する（範囲内に収め、AIM_STEP 刻みに丸める）
     function setAim(yawDeg, pitchDeg) {
       rawYawDeg = THREE.MathUtils.clamp(yawDeg, -AIM_YAW_LIMIT, AIM_YAW_LIMIT);
       rawPitchDeg = THREE.MathUtils.clamp(pitchDeg, -AIM_PITCH_LIMIT, AIM_PITCH_LIMIT);
-      aimYawDeg = Math.round(rawYawDeg);
-      aimPitchDeg = Math.round(rawPitchDeg);
-      cameraYaw = THREE.MathUtils.degToRad(aimYawDeg);
-      cameraPitch = THREE.MathUtils.degToRad(aimPitchDeg);
+      aimYawDeg = snapAngle(rawYawDeg);
+      aimPitchDeg = snapAngle(rawPitchDeg);
       refreshAimHud();
     }
 
@@ -1833,20 +1865,22 @@
 
     // =========================================================
     // カメラ：プレイヤーの後ろ（少し右の肩越し）から、狙っている向きを見る
-    // 左右の移動にはふんわり追従し、狙いの角度は即座に反映する（矢の向きはカメラによらない）。
+    // プレイヤーは刻みの立ち位置へスーッとスライドし、カメラの向きは刻んだ狙いの角度へなめらかに追いつく。
+    // （どちらも見た目だけ。矢はいつも刻みの立ち位置・刻んだ角度ちょうどから飛ぶ）
     // =========================================================
-    const cameraFocus = new THREE.Vector3(); // カメラの基準点（プレイヤーの頭の後ろあたり。滑らかに追従）
-    const focusGoal = new THREE.Vector3();
+    const cameraFocus = new THREE.Vector3(); // カメラの基準点（プレイヤーの頭の後ろあたり）
     const lookTarget = new THREE.Vector3();
 
     function updateCamera(dt, snap = false) {
-      // 見た目のプレイヤーを、刻みの立ち位置へ滑らかに動かす
-      if (snap) player.position.x = player.slotX;
-      else player.position.x += (player.slotX - player.position.x) * (1 - Math.exp(-CAMERA_SMOOTH * 2 * dt));
+      // 見た目のプレイヤーを、刻みの立ち位置へスライドさせる
+      const slide = snap ? 1 : 1 - Math.exp(-MOVE_SLIDE_SPEED * dt);
+      player.position.x += (player.slotX - player.position.x) * slide;
       const p = player.position;
-      focusGoal.set(p.x, p.y + CAMERA_HEIGHT, p.z);
-      if (snap) cameraFocus.copy(focusGoal);
-      else cameraFocus.lerp(focusGoal, 1 - Math.exp(-CAMERA_SMOOTH * dt));
+      cameraFocus.set(p.x, p.y + CAMERA_HEIGHT, p.z);
+      // カメラの向きを、刻んだ狙いの角度へ補間する
+      const turn = snap ? 1 : 1 - Math.exp(-CAMERA_AIM_SMOOTH * dt);
+      cameraYaw += (THREE.MathUtils.degToRad(aimYawDeg) - cameraYaw) * turn;
+      cameraPitch += (THREE.MathUtils.degToRad(aimPitchDeg) - cameraPitch) * turn;
 
       // 前方向（水平）と右方向。奥（+Z）を向いたとき、画面の右は -X
       const fx = Math.sin(cameraYaw), fz = Math.cos(cameraYaw);
@@ -1876,6 +1910,7 @@
       countdownStep: -1,  // 今表示しているカウントダウンの段階（0:「3」〜 3:「スタート！」）
       lastSecond: 0,      // 前回表示した残り秒数（毎秒の「ピッ」に使う）
       clearTime: null,    // クリアタイム：「スタート！」から最後に風船を割った瞬間まで [秒]（1個も割れていなければ null）
+      arrowBonus: 0,      // 全部割ったときの残り矢ボーナス（全部割れなければ 0）
       allClearTimer: 0,   // 「ALL CLEAR!」を表示している残り時間
     };
 
@@ -1919,7 +1954,7 @@
     // 上部の「位置 / 横 / 縦」を更新する（右が +、上が +。SOLUTION と同じ単位）
     const signed = (v, digits = 0) => `${v > 0 ? '+' : ''}${(v === 0 ? 0 : v).toFixed(digits)}`;
     function refreshAimHud() {
-      hudAimEl.textContent = `位置 ${signed(-player.slotX + 0, 1)}m / 横 ${signed(-aimYawDeg + 0)}° / 縦 ${signed(aimPitchDeg)}°`;
+      hudAimEl.textContent = `位置 ${signed(-player.slotX + 0, 1)}m / 横 ${signed(-aimYawDeg + 0, 1)}° / 縦 ${signed(aimPitchDeg + 0, 1)}°`;
     }
 
     const allClearEl = document.getElementById('all-clear');
@@ -1953,8 +1988,11 @@
       // クリアタイム：最後に割った瞬間のゲーム内の経過時間（金色の風船の動きと同じ時計）を 0.01 秒単位で
       game.clearTime = Math.round(gameTime * 100) / 100;
       refreshHud();
-      // 全部割ったら「ALL CLEAR!」を出し、少し待ってからリザルトへ
+      // 全部割ったら、残った矢1本につきボーナス。「ALL CLEAR!」を出し、少し待ってからリザルトへ
       if (game.popped >= balloons.length) {
+        game.arrowBonus = game.arrowsLeft * ALL_CLEAR_ARROW_BONUS;
+        game.score += game.arrowBonus;
+        refreshHud();
         allClearEl.querySelector('.time').textContent = formatTime(game.clearTime);
         game.allClearTimer = ALL_CLEAR_SHOW_TIME;
         playSound('beepStart');
@@ -1971,6 +2009,7 @@
       game.maxMulti = 0;
       game.lastSecond = TIME_LIMIT;
       game.clearTime = null;
+      game.arrowBonus = 0;
       // 飛んでいる矢と光の尾を消す（「×N HIT!」は出さない）
       for (const a of arrows) {
         scene.remove(a.mesh, a.trail.line);
@@ -2038,6 +2077,9 @@
       document.querySelector('#result-time span').textContent = formatTime(game.clearTime);
       document.getElementById('result-popped').textContent = `${game.popped}個`;
       document.getElementById('result-multi').textContent = `×${game.maxMulti}`;
+      // 残り矢ボーナスは全部割ったときだけ表示する
+      document.getElementById('result-arrow-bonus').textContent = `+${game.arrowBonus}`;
+      document.querySelectorAll('.arrow-bonus').forEach((el) => { el.style.display = game.popped >= balloons.length ? '' : 'none'; });
       document.getElementById('result-best').textContent = formatRecord(best);
       document.getElementById('new-record').classList.toggle('show', isNewRecord);
       refreshTitleBest();
@@ -2102,9 +2144,25 @@
     // 確認用：ブラウザのコンソールから simulateShots(SOLUTION) で満点ルートを試せる（画面には出さない）
     window.mirrorShooting = { simulateShots, SOLUTION };
 
+    // FPS 表示（0.5秒ごとに、その間の平均を出す）
+    const fpsEl = document.getElementById('fps');
+    fpsEl.hidden = !SHOW_FPS;
+    let fpsFrames = 0, fpsTime = 0;
+    function updateFps(rawDt) {
+      if (!SHOW_FPS) return;
+      fpsFrames++;
+      fpsTime += rawDt;
+      if (fpsTime < 0.5) return;
+      fpsEl.textContent = `${Math.round(fpsFrames / fpsTime)} FPS`;
+      fpsFrames = 0;
+      fpsTime = 0;
+    }
+
     function loop() {
+      const rawDt = clock.getDelta();
+      updateFps(rawDt);
       // タブ復帰時などに巨大な dt が来ても暴れないよう上限を設ける
-      const dt = Math.min(clock.getDelta(), 0.1);
+      const dt = Math.min(rawDt, 0.1);
       const steps = Math.ceil(dt / MAX_SUBSTEP);
       for (let i = 0; i < steps; i++) {
         // カウントダウン中は風船の動きを止めておき、「スタート！」から動きの時間を進める。
